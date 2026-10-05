@@ -3000,6 +3000,9 @@ TGAME_ZN_REQ_SETGAMESETTINGS = 0xA11E
 
 TGAME_ZN_REQ_ZONECHANNEL_LIST = 0xA132
 TGAME_ZN_RES_ZONECHANNEL_LIST = 0xA133
+# proto_c2zn.tdr: C2ZN_ReqSwitchLocalChannel (4B) / ZN2C_ResSwitchLocalChannel (6B)
+TGAME_ZN_REQ_SWITCHLOCALCHANNEL = 0xA12E
+TGAME_ZN_RES_SWITCHLOCALCHANNEL = 0xA12F
 TGAME_ZN_REQ_MAINCHNLLIST = 0xA355
 TGAME_ZN_RES_MAINCHNLLIST = 0xA356
 TGAME_ZN_REQ_CHANNEL_PING_VALUE = 0xA357
@@ -5087,9 +5090,42 @@ def _v170_reconcile_progression_skills():
     }
 
 
+AF_GRANT_ALL_ITEMS = os.environ.get("AF_GRANT_ALL_ITEMS", "1") != "0"
+
+
+def _v160_grant_all_catalog_items():
+    """Give the selected player one permanent copy of every catalog item.
+
+    Idempotent: a commodity is skipped once its root item is owned, and a
+    commodity whose root is already granted through another commodity (some
+    commodities share a root) is not granted twice.  Bags are granted too;
+    _v141_set_current_bag keeps exactly one mounted.  Returns rows added.
+    """
+    if not AF_GRANT_ALL_ITEMS:
+        return 0
+    owned = {int(p.get("item_id", 0)) for p in V111_INVENTORY}
+    now = int(time.time())
+    added = []
+    for commodity_id in sorted(set(V140_SHOP_ITEM_MAP) | set(V140_COMMODITY_BUNDLES)):
+        items = list(V140_COMMODITY_BUNDLES.get(commodity_id) or ())
+        root = int(items[0]) if items else int(V140_SHOP_ITEM_MAP[commodity_id])
+        if root in owned:
+            continue
+        props = _v140_build_commodity_props(commodity_id, 0, now)  # 0h = permanent
+        V111_INVENTORY.extend(props)
+        owned.update(int(p["item_id"]) for p in props)
+        added.extend(props)
+    return len(added)
+
+
 def _v140_select_player(uin):
     uin = _V140_PLAYER_STATE.select(int(uin))
     _v140_expire_due_items(reason="sqlite-player-select-expiry")
+
+    granted_rows = _v160_grant_all_catalog_items()
+    if granted_rows:
+        _v140_save_state("grant-all-catalog-items-v160")
+        log("MALL", f"v160 granted full catalog uin={uin} rows_added={granted_rows}")
 
     skill_sync = _v170_reconcile_progression_skills()
     skill_grants = list(skill_sync["granted"])
@@ -5395,6 +5431,12 @@ V139_PROTOCOL_ONLY[TGAME_ZN_REQ_SHOPCONFHASH] = (
 )
 V139_PROTOCOL_ONLY[TGAME_ZN_REQ_ITEM_OPERATION] = (
     "Protocol.ItemOperation", "CURRENT_BRANCH"
+)
+V139_CURRENT_HANDLER_IDS = frozenset(
+    set(V139_CURRENT_HANDLER_IDS) | {TGAME_ZN_REQ_SWITCHLOCALCHANNEL}
+)
+V139_PROTOCOL_ONLY[TGAME_ZN_REQ_SWITCHLOCALCHANNEL] = (
+    "TGOnlineMultiGameLobby.OnlineRequest_SwitchLocalChannel", "CURRENT_BRANCH"
 )
 
 # v22: A146 is now an active current-branch handler.
@@ -6917,6 +6959,30 @@ def _v76_build_zone_channel_list_response(main_channel_id=1):
         TGAME_ZN_MAGIC,
         TGAME_ZN_RES_ZONECHANNEL_LIST,
         body,
+    )
+
+
+def _v160_parse_switch_local_channel_request(body):
+    """C2ZN_ReqSwitchLocalChannel (0xA12E): u32 SubChannelId (live: 00000001)."""
+    if len(body) != 4:
+        raise ValueError(
+            f"SwitchLocalChannel request must be exactly 4B, got {len(body)}B"
+        )
+    return struct.unpack(">I", body)[0]
+
+
+def _v160_build_switch_local_channel_response(sub_channel_id=1):
+    """ZN2C_ResSwitchLocalChannel (0xA12F).
+
+    proto_c2zn.tdr gives the response a 6-byte body.  The field split
+    u16 Result + u32 SubChannelId is inferred from that size and from the
+    other Res* messages (Result = ZONE_ERR_SUCC), not read from the TDR.
+    # ponytail: every id is accepted; only one subchannel is advertised.
+    """
+    body = _v48_u16(ZONE_ERR_SUCC) + _v48_u32(sub_channel_id)
+    assert len(body) == 6
+    return _v62_build_server_app(
+        TGAME_ZN_MAGIC, TGAME_ZN_RES_SWITCHLOCALCHANNEL, body
     )
 
 
@@ -13093,6 +13159,24 @@ def handle_placeholder(conn, addr, label):
                                                 "cmd=0xA133 zones=1 last=1 "
                                                 "subchannels=1 id=1 name='Local Subchannel' "
                                                 "players=1/100 endpoint=127.0.0.1:65006"
+                                            )
+
+                                        elif app["cmd"] == TGAME_ZN_REQ_SWITCHLOCALCHANNEL:
+                                            sub_channel_id = _v160_parse_switch_local_channel_request(
+                                                app["body"]
+                                            )
+                                            log(
+                                                label,
+                                                "C2ZN_REQ_SWITCHLOCALCHANNEL v160: "
+                                                f"sub_channel_id={sub_channel_id}"
+                                            )
+                                            _v48_send_app(
+                                                conn, active_tgame_key,
+                                                _v160_build_switch_local_channel_response(
+                                                    sub_channel_id
+                                                ),
+                                                label,
+                                                "ZN2C_RES_SWITCHLOCALCHANNEL v160 cmd=0xA12F"
                                             )
 
                                         elif app["cmd"] == TGAME_ZN_REQ_CHANNEL_PING_VALUE:
