@@ -659,8 +659,11 @@ def main():
 
     def poll_lazy_ready():
         nonlocal afdev_ready
-        if not args.lazy_spawn or afdev_ready or loader_proc is None:
+        if not args.lazy_spawn or loader_proc is None:
             return
+        # Liveness is checked before the ready early-return: the loader lives as
+        # long as AFDEV, so its exit after SESSION_READY means the server died.
+        # (Teardown terminates the loader only in the finally block, after this loop.)
         if loader_proc.poll() is not None:
             detail = f"loader exited rc={loader_proc.returncode}"
             # r14 diagnostics: surface the loader's actual failure in the bridge
@@ -676,6 +679,8 @@ def main():
                 pass
             publish(state="FAILED", error=detail)
             raise RuntimeError(detail)
+        if afdev_ready:
+            return
         if spawn_started is not None and time.time() - spawn_started > max(5.0, float(args.startup_timeout)):
             detail = f"SESSION_READY timeout after {args.startup_timeout:.1f}s"
             publish(state="FAILED", error=detail)
