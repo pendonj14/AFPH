@@ -2,6 +2,7 @@ import importlib.util
 import os
 from pathlib import Path
 import sqlite3
+from contextlib import closing
 import struct
 import tempfile
 import unittest
@@ -33,7 +34,7 @@ def login_url(wire):
     _, pos, _ = H.read_string(rec[-1],6,rec[-2]//8)
     return H.read_string(rec[-1],pos,rec[-2]//8)[0]
 def create_db(path):
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute('CREATE TABLE player_profiles (uin INTEGER PRIMARY KEY, nickname TEXT)')
         db.executemany('INSERT INTO player_profiles VALUES (?,?)',[(10001,'dadada'),(10002,'猫😀Friend')])
 
@@ -83,7 +84,7 @@ class NamesTests(unittest.TestCase):
         absent=self.root/'absent.sqlite3'
         self.assertIsNone(H.nickname_from_db(absent,10001));self.assertFalse(absent.exists())
         for bad in ('Bad?Uin=10002','X\x00Y','x'*32,''):
-            with sqlite3.connect(self.db) as db: db.execute('UPDATE player_profiles SET nickname=? WHERE uin=10001',(bad,))
+            with closing(sqlite3.connect(self.db)) as db, db: db.execute('UPDATE player_profiles SET nickname=? WHERE uin=10001',(bad,))
             self.assertEqual(self.rewriter.rewrite(login(packet=50+len(bad)),'bad'+bad),login(packet=50+len(bad)))
     def test_join_bypasses_gameplay_and_reconnect_refreshes_profile(self):
         first=login(); result=self.rewriter.rewrite(first,'peer')
@@ -93,7 +94,7 @@ class NamesTests(unittest.TestCase):
             opaque=b'gameplay-datagram'
             self.assertEqual(self.rewriter.rewrite(opaque,'peer'),opaque)
             self.assertEqual(self.rewriter.rewrite(first,'peer'),result)
-        with sqlite3.connect(self.db) as db:db.execute("UPDATE player_profiles SET nickname='NewNick' WHERE uin=10001")
+        with closing(sqlite3.connect(self.db)) as db, db:db.execute("UPDATE player_profiles SET nickname='NewNick' WHERE uin=10001")
         hello=H.encrypt_wire(H.build_packet(0,[('ACK',31),bunch(b'\0'+b'\0'*9,op=1)]))
         self.assertGreater(struct.unpack_from('<I',hello)[0],17)
         self.assertEqual(self.rewriter.rewrite(hello,'peer'),hello)
@@ -103,7 +104,7 @@ class NamesTests(unittest.TestCase):
             self.assertEqual(self.rewriter.rewrite(wire,('bad',i)),wire)
         bad=H.encrypt_wire(H.build_packet(2,[bunch(b'\x05'+struct.pack('<i',2147483647))]))
         self.assertEqual(self.rewriter.rewrite(bad,'bad-string'),bad)
-        with sqlite3.connect(self.db) as db:db.execute('UPDATE player_profiles SET nickname=? WHERE uin=10001',('😀'*31,))
+        with closing(sqlite3.connect(self.db)) as db, db:db.execute('UPDATE player_profiles SET nickname=? WHERE uin=10001',('😀'*31,))
         data=b'\x05'+H.write_string('')+H.write_string(url()+ '?Padding='+'a'*310)
         oversized=H.encrypt_wire(H.build_packet(2,[bunch(data)]))
         self.assertEqual(self.rewriter.rewrite(oversized,'oversized'),oversized)
@@ -114,7 +115,7 @@ class NamesTests(unittest.TestCase):
         self.assertEqual(len(self.rewriter.peers['same']['packets']),16)
     def test_same_account_different_peers_refreshes_latest_database(self):
         self.assertIn('Name=dadada',login_url(self.rewriter.rewrite(login(),'first')))
-        with sqlite3.connect(self.db) as db:db.execute("UPDATE player_profiles SET nickname='Renamed' WHERE uin=10001")
+        with closing(sqlite3.connect(self.db)) as db, db:db.execute("UPDATE player_profiles SET nickname='Renamed' WHERE uin=10001")
         self.assertIn('Name=Renamed',login_url(self.rewriter.rewrite(login(),'second')))
 
 class BridgeTests(unittest.TestCase):
