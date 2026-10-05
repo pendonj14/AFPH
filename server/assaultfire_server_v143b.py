@@ -3850,6 +3850,12 @@ UPDATE_REASON_TP_BALANCE = 0x2A
 V140_DEFAULT_AP = 100000
 V140_DEFAULT_GP = 100000
 V140_DEFAULT_MP = 100000
+# Default starting level.  Level 100 is the maximum of the client rank table
+# (DefaultRankData.ini: ExpValue 9,574,910).  AF_DEFAULT_EXP=0 restores level 1.
+V161_DEFAULT_EXP = max(0, min(int(os.environ.get("AF_DEFAULT_EXP", "9574910")), 0x7FFFFFFF))
+# Rank-127/event skills (PVESkill23/24) that the level table never grants.
+V161_UNLOCK_ALL_SKILLS = os.environ.get("AF_UNLOCK_ALL_SKILLS", "1") != "0"
+V161_EVENT_SKILL_IDS = (100517, 100518)
 V140_ITEM_AVAIL_HOURS = 24 * 365 * 10
 V140_MALL_STATE_PATH = Path(__file__).with_name("assaultfire_mall_state.json")
 
@@ -4349,7 +4355,7 @@ def _v140_default_state():
     max_gid = max((int(p["gid"]) for p in inv), default=((V109_UIN & 0xffffffff) << 32))
     return {
         "version": 1,
-        "experience": 0,
+        "experience": V161_DEFAULT_EXP,
         "wallet": {
             "ap": V140_DEFAULT_AP,
             "gp": V140_DEFAULT_GP,
@@ -5152,6 +5158,33 @@ def _v160_grant_all_catalog_items():
     return len(added)
 
 
+def _v161_grant_event_skills():
+    """Give every player the rank-127/event skills the level table skips.
+
+    Same row shape as _v170_reconcile_progression_skills grants.  Idempotent.
+    """
+    if not V161_UNLOCK_ALL_SKILLS:
+        return 0
+    owned = {int(p.get("item_id", 0)) for p in V111_INVENTORY}
+    used_gids = {int(p.get("gid", 0)) for p in V111_INVENTORY}
+    added = 0
+    for item_id in V161_EVENT_SKILL_IDS:
+        if item_id in owned:
+            continue
+        gid = _v140_next_gid(used_gids)
+        used_gids.add(gid)
+        V111_INVENTORY.append(
+            {
+                "gid": gid, "item_id": item_id, "owner_gid": 0,
+                "location": V109_LOC_BAG, "durability": 0, "durability_max": 0,
+                "avail_hours": V140_ITEM_AVAIL_HOURS, "validity": V140_ITEM_AVAIL_HOURS,
+                "gain_type": 1, "obtained_at": 0, "expires_at": 0,
+            }
+        )
+        added += 1
+    return added
+
+
 def _v140_select_player(uin):
     uin = _V140_PLAYER_STATE.select(int(uin))
     _v140_expire_due_items(reason="sqlite-player-select-expiry")
@@ -5160,6 +5193,17 @@ def _v140_select_player(uin):
     if granted_rows:
         _v140_save_state("grant-all-catalog-items-v160")
         log("MALL", f"v160 granted full catalog uin={uin} rows_added={granted_rows}")
+
+    # Level floor, applied before the skill reconcile so every level-gated PvE
+    # skill unlocks (experience above the floor is never lowered).
+    if int(V140_MALL_STATE.get("experience", 0)) < V161_DEFAULT_EXP:
+        V140_MALL_STATE["experience"] = V161_DEFAULT_EXP
+        _v140_save_state("default-level-floor-v161")
+        log("MALL", f"v161 raised experience to default level floor uin={uin} exp={V161_DEFAULT_EXP}")
+    event_skills = _v161_grant_event_skills()
+    if event_skills:
+        _v140_save_state("event-skills-v161")
+        log("MALL", f"v161 granted event skills uin={uin} added={event_skills}")
 
     skill_sync = _v170_reconcile_progression_skills()
     skill_grants = list(skill_sync["granted"])
