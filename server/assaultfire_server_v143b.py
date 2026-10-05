@@ -535,6 +535,8 @@ def _v143b_tdr_ipv4(host):
 def _v143b_reserve_room_ds(role_state, create_req):
     if not V143B_DS_CONFIG.enabled:
         return None
+    if int(create_req.get("mode_id", 0x00002001)) not in AFDEV_MODE_IDS:
+        return None
 
     owner_uin = int(role_state.get("uin") or 10001)
     use_client_map = os.environ.get("AF_DS_USE_CLIENT_MAP", "1").strip().lower() in (
@@ -560,6 +562,32 @@ def _v143b_reserve_room_ds(role_state, create_req):
     # r8: reservation is bookkeeping only. Do NOT start the bridge or AFDEV
     # during A10A. The bridge is armed only when match handoff is requested.
     role_state["v143b_ds_room_id"] = allocation.room_id
+    return allocation
+
+
+def _v143b_ensure_room_ds(room, mode_id=None):
+    """Lazily reserve DS bookkeeping for a registry room the spawner lacks (restored after a restart, or created in a mode that skipped reservation)."""
+    if not V143B_DS_CONFIG.enabled or not isinstance(room, dict) or room.get("room_id") is None:
+        return None
+    room_id = int(room["room_id"])
+    existing = V143B_DS_SPAWNER.allocation_for_room(room_id)
+    if existing is not None and existing.state != "RELEASED":
+        return existing
+    mode = int(room.get("mode_id", 0) if mode_id is None else mode_id)
+    if mode not in AFDEV_MODE_IDS:
+        return None
+    allocation = V143B_DS_SPAWNER.reserve_lobby(
+        room_id=room_id,
+        owner_id=int(room["owner_uin"]),
+        owner_nickname=str(room.get("owner_name") or ""),
+        max_players=max(2, int(room.get("fighter_capacity") or 0)),
+        mode_id=mode,
+        map_id=int(room.get("map_id", 0)),
+        sub_mode_id=int(room.get("sub_mode_id", 0)),
+        room_flags=int(room.get("flags", 0)),
+    )
+    for member in room.get("members") or []:
+        V143B_DS_SPAWNER.register_room_player(room_id, int(member["uin"]))
     return allocation
 
 
@@ -7963,7 +7991,11 @@ def _v132_send_pve_afdev_handoff(
             "match_map_id": start_settings.get("match_map_id"),
             "sub_mode_id": start_settings.get("sub_mode_id"),
             "room_flags": start_settings.get("room_flags"),
-            "map_name": map_override,
+            "map_name": (
+                (str(start_settings.get("map_string") or "").strip() or None)
+                if use_client_map
+                else map_override
+            ),
         }
     elif room_for_handoff.get("room_id") is not None:
         room_map_name = (
@@ -8010,6 +8042,11 @@ def _v132_send_pve_afdev_handoff(
     if V143B_DS_CONFIG.enabled:
         if isinstance(requested_settings, dict):
             try:
+                if room_id is not None:
+                    _v143b_ensure_room_ds(
+                        V150_ROOM_REGISTRY.get_room(int(room_id)),
+                        mode_id=requested_settings["mode_id"],
+                    )
                 allocation = V143B_DS_SPAWNER.prepare_lobby_for_match(
                     owner_id=int(role_state.get("uin") or 10001),
                     owner_nickname=_v150_role_nickname(role_state),
@@ -8342,23 +8379,36 @@ def _v72_parse_start_room_alloc(body):
     if len(body) < 42:
         raise ValueError(f"StartRoomAlloc body too short: {len(body)}B")
     uin = struct.unpack_from(">Q", body, 0)[0]
-    match = body[8:40]
-    hard_level = body[40]
-    map_count = body[41]
-    need = 42 + 4 * map_count
+    # MatchSettings holds a length-prefixed MapString after ModeId/MapId
+    # (offset 14); the empty capture (5-byte string) ends at offset 19.
+    try:
+        map_string, _raw, after = _v79_read_lp_string(body, 14, 32)
+    except ValueError:
+        map_string, after = "", 19
+    extra = after - 19
+    if extra < 0 or len(body) < 42 + extra:
+        raise ValueError(f"StartRoomAlloc body too short: {len(body)}B")
+    match = body[8:40 + extra]
+    hard_level = body[40 + extra]
+    map_count = body[41 + extra]
+    need = 42 + extra + 4 * map_count
     if len(body) < need:
         raise ValueError(
             f"StartRoomAlloc truncated: map_count={map_count} "
             f"need={need} got={len(body)}"
         )
-    maps = [struct.unpack_from(">I", body, 42 + 4*i)[0] for i in range(map_count)]
+    maps = [
+        struct.unpack_from(">I", body, 42 + extra + 4*i)[0]
+        for i in range(map_count)
+    ]
     mode_id = struct.unpack_from(">I", match, 0)[0] if len(match) >= 4 else None
     match_map_id = struct.unpack_from(">H", match, 4)[0] if len(match) >= 6 else None
-    # Captured PH MatchSettings packs these fields at byte offsets 11 and 15.
-    sub_mode_id = struct.unpack_from(">I", match, 11)[0] if len(match) >= 15 else None
-    room_flags = struct.unpack_from(">I", match, 15)[0] if len(match) >= 19 else None
+    # SubModeId and room Flags follow the MapString (offsets 19/23 when empty).
+    sub_mode_id = struct.unpack_from(">I", body, after)[0] if len(body) >= after + 4 else None
+    room_flags = struct.unpack_from(">I", body, after + 4)[0] if len(body) >= after + 8 else None
     return {
         "uin": uin,
+        "map_string": map_string,
         "match": match,
         "mode_id": mode_id,
         "match_map_id": match_map_id,
@@ -11736,15 +11786,14 @@ def handle_placeholder(conn, addr, label):
                                                     )
                                                     continue
 
+                                            new_room_id = (
+                                                int(ds_allocation.room_id)
+                                                if ds_allocation is not None
+                                                else V143B_DS_SPAWNER.new_room_id()
+                                            )
                                             created_room = {
-                                                "room_id": (
-                                                    int(ds_allocation.room_id)
-                                                    if ds_allocation is not None else 1
-                                                ),
-                                                "display_id": (
-                                                    (int(ds_allocation.room_id) & 0xFFFF) or 1
-                                                    if ds_allocation is not None else 1
-                                                ),
+                                                "room_id": new_room_id,
+                                                "display_id": (new_room_id & 0xFFFF) or 1,
                                                 "qqtalk_room_id": 0,
                                                 "sub_channel_id": 1,
                                                 "name": cr["name"],
@@ -11924,7 +11973,7 @@ def handle_placeholder(conn, addr, label):
                                                     password=er["password"],
                                                     observer=er["observer"],
                                                 )
-                                                if V143B_DS_CONFIG.enabled:
+                                                if _v143b_ensure_room_ds(joined_room) is not None:
                                                     V143B_DS_SPAWNER.register_room_player(
                                                         int(joined_room["room_id"]),
                                                         uin_now,
@@ -12481,7 +12530,10 @@ def handle_placeholder(conn, addr, label):
                                                         "preserving started=True and live DS allocation",
                                                     )
                                                 else:
-                                                    if V143B_DS_CONFIG.enabled:
+                                                    if V143B_DS_CONFIG.enabled and _v143b_ensure_room_ds(
+                                                        fresh_room or room,
+                                                        mode_id=settings["mode_id"],
+                                                    ) is not None:
                                                         V143B_DS_SPAWNER.prepare_lobby_settings_update(
                                                             room_id,
                                                             requester_uin,
@@ -15100,6 +15152,11 @@ if __name__ == "__main__":
         f"removed rooms={restart_room_state['removed_rooms']} "
         f"expired members={restart_room_state['removed_members']}",
     )
+    restored_room_ids = [
+        int(r["room_id"]) for r in V150_ROOM_REGISTRY.list_rooms(include_started=True)
+    ]
+    if restored_room_ids and V143B_DS_SPAWNER is not None:
+        V143B_DS_SPAWNER.seed_room_ids(max(restored_room_ids))
 
     for label, kind, port, sock in listener_sockets:
         target = listen_on_port if kind == "tcp" else listen_on_udp_port

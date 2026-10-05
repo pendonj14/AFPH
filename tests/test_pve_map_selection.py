@@ -107,8 +107,7 @@ class PVEMapSelectionTests(unittest.TestCase):
         parser_start = server.index("def _v72_parse_start_room_alloc(")
         parser_end = server.index("def _v72_build_enter_room_alloc_success(", parser_start)
         parser = server[parser_start:parser_end]
-        self.assertIn('struct.unpack_from(">I", match, 11)[0]', parser)
-        self.assertIn('struct.unpack_from(">I", match, 15)[0]', parser)
+        self.assertIn("_v79_read_lp_string(body, 14, 32)", parser)
         self.assertIn('"sub_mode_id": sub_mode_id', parser)
         self.assertIn('"room_flags": room_flags', parser)
 
