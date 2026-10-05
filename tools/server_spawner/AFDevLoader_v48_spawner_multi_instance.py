@@ -317,6 +317,10 @@ TOWER_DEFENSE_MODE_ID = 0x00002005
 TANK_TDM_MODE_ID = 0x00000203
 TANK_SIEGE_MODE_ID = 0x00000206
 TANK_GAME_MODE_IDS = frozenset((TANK_TDM_MODE_ID, TANK_SIEGE_MODE_ID))
+AFDEV_LOADER_MODE_IDS = frozenset((
+    0x00002001, STEEL_FORTRESS_MODE_ID_V4, TOWER_DEFENSE_MODE_ID,
+    BIO_MODE_ID_V49, HERO_MUTATION_MODE_ID,
+)) | TANK_GAME_MODE_IDS
 
 
 # v45 established the legacy TGSV PvE round family with stock
@@ -1821,7 +1825,7 @@ def wait_for_nonnull_gworld(hproc, timeout=15.0):
 
         time.sleep(0.10)
 
-    return last
+    raise RuntimeError(f"GWorld stayed NULL for {timeout:.1f}s")
 
 
 def is_probable_object_pointer(hproc, ptr):
@@ -5273,6 +5277,18 @@ def _pve_object_header(hproc, obj):
     }
 
 
+def _gameinfo_is_a(hproc, authority, want_fname):
+    hdr = _pve_object_header(hproc, int((authority or {}).get("game_info") or 0))
+    cur, seen = (hdr or {}).get("class"), set()
+    while hdr and _pve_ptr(cur) and cur not in seen:
+        seen.add(cur)
+        c = _pve_object_header(hproc, cur)
+        if c and (c["name_index"], c["name_number"]) == tuple(want_fname):
+            return True
+        cur = safe_read_u32(hproc, cur + PVE_USTRUCT_SUPER)
+    return False
+
+
 def _pve_construct_fname(hproc, hthread, text_value):
     text_bytes = text_value.encode("utf-16le") + b"\x00\x00"
     remote = kernel32.VirtualAllocEx(
@@ -5896,6 +5912,9 @@ def main():
             "Missing --map. Use the room-selected PvE MapString or set AF_DS_DEFAULT_MAP explicitly."
         )
 
+    if int(args.mode_id) not in AFDEV_LOADER_MODE_IDS:
+        raise SystemExit(f"unsupported AFDEV ModeId 0x{int(args.mode_id) & 0xFFFFFFFF:08X}")
+
     if args.no_uac:
         if not shell32.IsUserAnAdmin():
             raise SystemExit(
@@ -6319,7 +6338,7 @@ def main():
 
         print()
         print(
-            "[AFDEV-v45] PVE LEGACY-SV TEST: PVEGame.TGSVGame selected from actual map Kismet."
+            f"[AFDEV-v45] target GameInfo: {args.game} (mode=0x{int(args.mode_id):08X})"
         )
         print(
             "[AFDEV-v45] Required mode: GIsClient=0 GIsServer=1 GIsEditor=0"
@@ -6428,22 +6447,26 @@ def main():
                 samples=16,
                 interval=0.25,
             )
+            raise RuntimeError(
+                f"LoadMap reached stage {highest_stage}/7; refusing SESSION_READY"
+            )
         else:
             print(
                 "[AFDEV] LoadMap completed all seven instrumented stages."
             )
 
         if steel_v4_deferred:
-            if highest_stage < 7:
-                raise RuntimeError(
-                    "Steel LoadMap did not reach stage 7; refusing to enable "
-                    "ServerMove v4 into an incomplete world"
+            prev = kernel32.SuspendThread(pi.hThread)
+            if prev == 0xFFFFFFFF:
+                winerr("SuspendThread(Steel ServerMove-v4 restore)")
+            try:
+                write_remote(
+                    pi.hProcess,
+                    PVE_SERVERMOVE_STUB_V48,
+                    steel_v4_saved_stub,
                 )
-            write_remote(
-                pi.hProcess,
-                PVE_SERVERMOVE_STUB_V48,
-                steel_v4_saved_stub,
-            )
+            finally:
+                kernel32.ResumeThread(pi.hThread)
             restored = read_remote(
                 pi.hProcess,
                 PVE_SERVERMOVE_STUB_V48,
@@ -6486,6 +6509,11 @@ def main():
             engine_ptr,
             timeout=20.0,
         )
+
+        if not cleared:
+            raise RuntimeError(
+                "PendingURL did not clear within 20s; refusing SESSION_READY"
+            )
 
         if cleared:
             gworld_now = safe_read_u32(
@@ -6675,6 +6703,32 @@ def main():
                         f"unsupported AFDEV ModeId 0x{int(args.mode_id) & 0xFFFFFFFF:08X}"
                     )
 
+                # Verify the requested GameInfo class is the live one before
+                # SESSION_READY.  Escape hatch: AF_DS_SKIP_GAMEINFO_CHECK=1.
+                if os.environ.get("AF_DS_SKIP_GAMEINFO_CHECK") == "1":
+                    print("[AFDEV-GAMEINFO] check skipped (AF_DS_SKIP_GAMEINFO_CHECK=1)")
+                else:
+                    want_gameinfo = _pve_construct_fname(
+                        pi.hProcess,
+                        pi.hThread,
+                        game_class.rsplit(".", 1)[-1],
+                    )
+                    gameinfo_deadline = time.time() + 12.0
+                    while True:
+                        if _gameinfo_is_a(pi.hProcess, authority, want_gameinfo):
+                            print(f"[AFDEV-GAMEINFO] verified {args.game}")
+                            break
+                        if time.time() >= gameinfo_deadline or not process_alive(pi.hProcess):
+                            raise RuntimeError(
+                                f"requested GameInfo {args.game!r} is not live"
+                            )
+                        time.sleep(0.25)
+                        authority = inspect_authority_world(
+                            pi.hProcess,
+                            pi.hThread,
+                            final_gworld,
+                        )
+
                 # r8: A11A advertises a zero DSKey.  Do not publish
                 # SESSION_READY until this exact AFDEV instance's live encrypted
                 # UDP socket has been rekeyed with the validated v72 routine.
@@ -6752,180 +6806,11 @@ def main():
                 while process_alive(pi.hProcess):
                     time.sleep(1.0)
                 return
-
-            players_before = inspect_local_players(
-                pi.hProcess,
-                engine_ptr,
-                label=" BEFORE UI hide",
-            )
-
-            print(
-                "[AFDEV] Natural loading-completion mode: "
-                "NOT forcing UE3 fullscreen-movie stop."
-            )
-            print(
-                "[AFDEV] Natural loading-completion mode: "
-                "NOT forcing Assault Fire LoadingMovie hide."
-            )
-            print(
-                "[AFDEV] Leaving the stock movie/streaming completion path "
-                "intact so the PlayerController load-complete callback can fire."
-            )
-
-            # IMPORTANT:
-            # Earlier loader versions manually called:
-            #   stop_loading_movie_on_game_thread(...)
-            #   hide_af_loading_ui_on_game_thread(...)
-            #
-            # Current live UnrealScript analysis shows the stock completion path
-            # enters an externally-triggered function containing "UT_loadmovie",
-            # which sets bInitialProcessingComplete=TRUE and calls the
-            # "Load Complete Player:" handler.  Forcing the movie/UI closed here
-            # can bypass that native/delegate callback.  Do not short-circuit it.
-            time.sleep(2.0)
-
-            players_after = inspect_local_players(
-                pi.hProcess,
-                engine_ptr,
-                label=" AFTER UI hide",
-            )
-
-            lp0, pc0 = wait_for_player_controller(
-                pi.hProcess,
-                engine_ptr,
-                timeout=10.0,
-            )
-
-            print(
-                f"[AFDEV] Controller wait result: "
-                f"ULocalPlayer=0x{lp0:08X} "
-                f"PlayerController=0x{pc0:08X}"
-            )
-
-            final_gworld = wait_for_nonnull_gworld(
-                pi.hProcess,
-                timeout=10.0,
-            )
-
-            print(
-                f"[AFDEV] Final GWorld after transition wait: "
-                f"0x{final_gworld:08X}"
-            )
-
-            authority = inspect_authority_world(
-                pi.hProcess,
-                pi.hThread,
-                final_gworld,
-            )
-
-            # v23: TGTeamMatch_Tutorial still returns
-            # Engine.GameMessage.MaxedOutMessage even when the OPEN URL
-            # contains ?MaxPlayers=4.  Test the live GameInfo object directly
-            # through UE3's native SET/GETALL console support after LoadMap,
-            # when WorldInfo.Game definitely exists.
-            print()
-            print("[AFDEV] ===== RUNTIME GAMEINFO CAPACITY OVERRIDE =====")
-
-            capacity_commands = [
-                "GETALL GameInfo MaxPlayers",
-                f"SET GameInfo MaxPlayers {max_players}",
-                f"SET GameInfo MaxSpectators {max_players}",
-                "GETALL GameInfo MaxPlayers",
-                "GETALL GameInfo MaxSpectators",
-            ]
-
-            for cap_cmd in capacity_commands:
-                try:
-                    cap_result = inject_exec_on_game_thread(
-                        pi.hProcess,
-                        pi.hThread,
-                        engine_ptr,
-                        log_ptr,
-                        cap_cmd,
-                    )
-                    print(
-                        f"[AFDEV] CAPACITY CMD result=0x{cap_result:08X}: "
-                        f"{cap_cmd}"
-                    )
-                except Exception as e:
-                    print(
-                        f"[AFDEV] CAPACITY CMD failed: {cap_cmd}: {e}"
-                    )
-
-            print("[AFDEV] ===== END RUNTIME CAPACITY OVERRIDE =====")
-            print()
-
-            scan_world_for_tggame_and_tgpawn(
-                pi.hProcess,
-                final_gworld,
-            )
-
-            scan_exact_tgplayercontroller(
-                pi.hProcess,
-                lp0,
-                pc0,
-                final_gworld,
-            )
-
-            global_game_hits, global_pc_hits, global_pawn_hits = (
-                scan_tutorial_runtime_globally(
-                    pi.hProcess,
-                )
-            )
-
-            print(
-                "[AFDEV] v23 is intentionally NOT running the old "
-                "console-command pawn probes. This run is focused on "
-                "whether ?listen creates a real authoritative GameInfo."
-            )
-
-            print(
-                "[AFDEV] NOTE: v0.13's borrowed +0x66C/+0x670/+0x688 "
-                "controller offsets were invalid for Assault Fire and "
-                "are intentionally NOT used by v0.14."
-            )
-
-            print(
-                "[AFDEV] Both loading-screen paths have now been "
-                "explicitly stopped/hidden."
-            )
-        else:
-            print(
-                "[AFDEV] PendingURL did not clear within 20 seconds; "
-                "not forcing StopMovie yet."
-            )
-
-        monitor_travel_state(
-            pi.hProcess,
-            engine_ptr,
-            game_root,
-            seconds=8,
-        )
-
-        print()
-        print(
-            "[AFDEV-v24] Synthetic-host observer guard status: "
-            f"first_patch={pve_host_guard_state['first_patch']} "
-            f"patch_count={pve_host_guard_state['patch_count']} "
-            f"last_pc=0x{pve_host_guard_state['last_pc']:08X} "
-            f"last_pri=0x{pve_host_guard_state['last_pri']:08X}"
-        )
-        if not pve_host_guard_state["first_patch"]:
-            print(
-                "[AFDEV-v24] WARNING: the guard never saw the verified "
-                "PVE GamePlayers[0] controller. Do NOT interpret this run "
-                "as a test of the host-observer hypothesis."
-            )
-
-        print(
-            "Send the console output and a screenshot of what is visible "
-            "after the StopMovie call."
-        )
-
-        kernel32.WaitForSingleObject(
-            pi.hProcess,
-            INFINITE,
-        )
+    except (Exception, SystemExit):
+        # Ctrl+C (KeyboardInterrupt) is deliberately excluded: the banner above
+        # promises it only stops monitoring and leaves AFDEV running.
+        kernel32.TerminateProcess(pi.hProcess, 0xAF07)
+        raise
 
     finally:
         if pi.hThread:
