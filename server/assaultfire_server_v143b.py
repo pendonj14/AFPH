@@ -526,6 +526,11 @@ V143B_ZONE_ERR_NO_DS_CAPACITY = int(
 ) & 0xFFFF
 
 
+# Address advertised to clients (directory/zone/ping/match). Set AF_PUBLIC_HOST
+# to the Tailscale/VPS IP for remote players; default keeps single-PC play.
+PUBLIC_HOST = os.environ.get("AF_PUBLIC_HOST", "127.0.0.1").strip() or "127.0.0.1"
+
+
 def _v143b_tdr_ipv4(host):
     """Convert dotted IPv4 to the byte order GameServerInfo.Ip expects."""
     packed = socket.inet_aton(str(host))
@@ -3146,8 +3151,8 @@ def tgame_build_geo_pinglist_response(seq, max_delay_ms=1000):
       * Domain is encoded as u32_be(strlen+1) followed by NUL-terminated ASCII.
     """
     group = 0
-    ipv4 = 0x7F000001       # semantic 127.0.0.1
-    domain = "127.0.0.1"
+    ipv4 = int.from_bytes(socket.inet_aton(PUBLIC_HOST), "big")
+    domain = PUBLIC_HOST
     ping_ms = 0
 
     ping_info = (
@@ -3166,7 +3171,8 @@ def tgame_build_geo_pinglist_response(seq, max_delay_ms=1000):
     # Domain="127.0.0.1\0" is 10 bytes plus a 4-byte BE length prefix.
     # PingInfo is therefore 26 bytes and the complete response body is 34
     # bytes (0x22).  This exact layout returned EAX=0 from the live TDR decoder.
-    if len(ping_info) != 26 or len(body) != 34:
+    # ponytail: size is only fixed (26/34) for 127.0.0.1; Domain is length-prefixed.
+    if PUBLIC_HOST == "127.0.0.1" and (len(ping_info) != 26 or len(body) != 34):
         raise AssertionError(
             f"unexpected GEO ping sizes: ping_info={len(ping_info)} body={len(body)}"
         )
@@ -3382,8 +3388,8 @@ def _v48_build_geo_zonelist(seq, port=TGAME_ZONE_PORT, ping_ms=0xfffffffe):
         # TDR decodes uint32 into little-endian host memory, so 127.0.0.1 must
         # be serialized numerically as 0x0100007F to leave bytes 7F 00 00 01
         # in the decoded object. 0x7F000001 produced 1.0.0.127 at connect().
-        _v48_u32(0x0100007f)
-        + _v50_geo_tdr_string("127.0.0.1", 128)
+        _v48_u32(_v143b_tdr_ipv4(PUBLIC_HOST))
+        + _v50_geo_tdr_string(PUBLIC_HOST, 128)
         + _v48_u16(port)
         + _v48_i32(1)
         + _v48_u32(ping_ms)
@@ -6963,8 +6969,8 @@ def _v76_build_zone_channel_list_response(main_channel_id=1):
 
     zone = (
         _v48_u32(main_channel_id)
-        + _v48_u32(0x0100007F)                       # 127.0.0.1 in TGame host-memory form
-        + _v50_geo_tdr_string("127.0.0.1", 128)
+        + _v48_u32(_v143b_tdr_ipv4(PUBLIC_HOST))     # TGame host-memory form
+        + _v50_geo_tdr_string(PUBLIC_HOST, 128)
         + _v48_u16(TGAME_ZONE_PORT)
         + _v48_i32(1)                                # ChannelCount (schema: 4 bytes)
         + channel
@@ -8028,7 +8034,7 @@ def _v132_send_pve_afdev_handoff(
         )
         return True
 
-    handoff_host = "127.0.0.1"
+    handoff_host = PUBLIC_HOST
     handoff_port = TGAME_AFDEV_PORT
     allocation = None
 
@@ -9520,7 +9526,7 @@ def handle_placeholder(conn, addr, label):
                 app, priv_payload = role_build_tacc_one_private_entry_app(
                     uin=role_state.get("uin") or 10001,
                     server_id=0x01010101,
-                    host="127.0.0.1",
+                    host=PUBLIC_HOST,
                     port=65005,
                     cmdid=2,
                     update_time=int(time.time()),
@@ -13968,7 +13974,7 @@ def build_dir_leaf():
 
     node += tdr_string("Assault Fire Local")
     node += tdr_u32(0)               # BitmapMask
-    node += tdr_string("tcp://127.0.0.1:65005")
+    node += tdr_string(f"tcp://{PUBLIC_HOST}:65005")
     node += tdr_string("1.0.0.24")
     node += tdr_u32(3)               # CltAttr
     node += tdr_u32(0)               # CltAttr1
@@ -13979,7 +13985,7 @@ def build_dir_leaf():
     # It extracts text before ':' as host and text between ':' and ';' as port.
     # Using "tcp://..." makes the first ':' belong to "tcp:" and leaves the
     # numeric-port parse empty -> atoi("") == 0 -> CreateInitConnectionEx port 0.
-    node += tdr_string("127.0.0.1:65005;")
+    node += tdr_string(f"{PUBLIC_HOST}:65005;")
     node += tdr_u16(0)               # AppDynamicAttr
 
     return bytes(node)
