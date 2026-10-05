@@ -43,6 +43,7 @@ ROOM_TARGETS = {
     (0x00002001, 0x002F): ("SV-Maya_3_Main", "PVEGame.TGSVGame"),
     (0x00002001, 0x0007): ("SV-Factory_1_Main", "PVEGame.TGSVGame"),
     (0x00002002, 0x0010): ("IF-Factory_3_Main", "PVEGame.TGIFGame"),
+    (0x00002002, 0x005F): ("IF2-Factory_83_Main", "TGIFGame.TGIF2Game"),
     # Mutation: Horror City and both Old Town map IDs from the PH client catalog.
     (0x00000204, 0x0027): ("Bio-Capital_4_Main", "TGBioGame.TGBioMatch"),
     (0x00000204, 0x0048): ("Bio2-Capital_12_Main", "TGBioGame.TGBioMatch"),
@@ -116,26 +117,28 @@ def normalize_tank_mode_map(mode_id: int, map_id: int, sub_mode_id: int = 0):
     return mode, map_value
 
 
-def room_target_for(mode_id: int, map_id: int):
-    key = normalize_tank_mode_map(mode_id, map_id)
-    return ROOM_TARGETS.get(key)
-
-
 def resolve_room_target(
     mode_id: int,
     map_id: int,
     fallback_map: str = "",
     fallback_game: str = "PVEGame.TGSVGame",
+    sub_mode_id: int = 0,
 ):
-    normalized_mode, normalized_map = normalize_tank_mode_map(mode_id, map_id)
-    target = ROOM_TARGETS.get((normalized_mode, normalized_map))
+    mode, map_value = normalize_tank_mode_map(mode_id, map_id, sub_mode_id)
+    client_map = str(fallback_map or "").strip()
+    target = ROOM_TARGETS.get((mode, map_value))
     if target is not None:
-        return target
-    game_class = MODE_GAME_CLASSES.get(
-        normalized_mode,
-        str(fallback_game or "").strip(),
-    )
-    return str(fallback_map or "").strip(), game_class
+        world, game = target
+        # A client MapString may only pick a sibling world of the SAME family
+        # prefix (SV-, IF2-, Bio2-, ATD-...); tank modes use the verified world.
+        if (
+            mode not in TANK_GAME_MODE_IDS
+            and "-" in client_map
+            and client_map.partition("-")[0] == world.partition("-")[0]
+        ):
+            world = client_map
+        return world, game
+    return client_map, MODE_GAME_CLASSES.get(mode, str(fallback_game or "").strip())
 
 
 class SpawnerError(RuntimeError):
@@ -307,7 +310,7 @@ class DedicatedServerSpawner:
         try:
             s.bind((bind_host, int(port)))
             return True
-        except OSError:
+        except (OSError, OverflowError):
             return False
         finally:
             try:
@@ -343,17 +346,39 @@ class DedicatedServerSpawner:
     def start_warm_pool(self) -> None:
         self._log("r10 lazy-latch mode: warm pool disabled; AFDEV=OFF until first valid bridge UDP packet")
 
+    def new_room_id(self) -> int:
+        with self._lock:
+            room_id = self._next_room_id
+            self._next_room_id += 1
+            return room_id
+
+    def seed_room_ids(self, max_existing: int) -> None:
+        with self._lock:
+            self._next_room_id = max(self._next_room_id, int(max_existing) + 1)
+
     def reserve_lobby(
         self, *, owner_id: int, owner_nickname: str = "",
         map_name: Optional[str] = None, max_players: int = 4,
         mode_id: int = 0x00002001, map_id: int = 0x002F,
         sub_mode_id: int = 0x00001001, room_flags: int = 0x00003008,
+        room_id: Optional[int] = None,
     ) -> DSAllocation:
         owner_id = int(owner_id)
         owner_nickname = str(owner_nickname or "").strip()[:31]
         now = time.time()
         with self._lock:
-            existing_room = self._owner_to_room.get(owner_id)
+            if room_id is not None:
+                room_id = int(room_id)
+                known = self._allocations.get(room_id)
+                if known is not None and known.state != "RELEASED":
+                    return known
+                mapped = self._allocations.get(self._owner_to_room.get(owner_id))
+                if mapped is not None and mapped.state != "RELEASED":
+                    raise SpawnerError(
+                        f"owner={owner_id} already holds live room {mapped.room_id}; "
+                        f"cannot reserve explicit room {room_id}"
+                    )
+            existing_room = self._owner_to_room.get(owner_id) if room_id is None else None
             if existing_room is not None:
                 existing = self._allocations.get(existing_room)
                 if existing and existing.state != "RELEASED":
@@ -368,29 +393,23 @@ class DedicatedServerSpawner:
                     return existing
 
             last = self._last_create.get(owner_id)
-            if last is not None and now - last < self.config.create_cooldown:
+            if room_id is None and last is not None and now - last < self.config.create_cooldown:
                 raise DSCapacityError(
                     f"lobby-create cooldown active for owner={owner_id} "
                     f"({now - last:.2f}s < {self.config.create_cooldown:.2f}s)"
                 )
 
             slot = self._choose_slot_locked()
-            room_id = self._next_room_id
-            self._next_room_id += 1
+            if room_id is None:
+                room_id = self.new_room_id()
+            self._next_room_id = max(self._next_room_id, room_id + 1)
             normalized_mode, normalized_map_id = normalize_tank_mode_map(
                 mode_id, map_id, sub_mode_id
             )
-            desired_map = str(map_name or "").strip()
-            desired_game = MODE_GAME_CLASSES.get(
-                normalized_mode, str(self.config.game_class or "").strip()
+            desired_map, desired_game = resolve_room_target(
+                mode_id, map_id, map_name, self.config.game_class, sub_mode_id
             )
-            verified_target = room_target_for(normalized_mode, normalized_map_id)
-            if verified_target is not None:
-                verified_map, verified_game = verified_target
-                if not desired_map or normalized_mode in TANK_GAME_MODE_IDS:
-                    desired_map = verified_map
-                desired_game = verified_game
-            elif not desired_map and normalized_mode not in MODE_GAME_CLASSES:
+            if not desired_map and normalized_mode not in MODE_GAME_CLASSES:
                 # Keep the configured default for legacy/unclassified modes.
                 # For a known family, an unknown empty MapString must fail closed
                 # instead of silently launching the default map.
@@ -483,17 +502,9 @@ class DedicatedServerSpawner:
         )
         normalized_sub_mode = int(sub_mode_id) & 0xFFFFFFFF
         normalized_flags = int(room_flags) & 0xFFFFFFFF
-        verified_target = room_target_for(normalized_mode, normalized_map_id)
-        desired_map = str(map_name or "").strip()
-        if verified_target is not None and (
-            not desired_map or normalized_mode in TANK_GAME_MODE_IDS
-        ):
-            desired_map = verified_target[0]
-        desired_game = MODE_GAME_CLASSES.get(
-            normalized_mode, str(self.config.game_class or "").strip()
+        desired_map, desired_game = resolve_room_target(
+            mode_id, map_id, map_name, self.config.game_class, sub_mode_id
         )
-        if verified_target is not None:
-            desired_game = verified_target[1]
 
         settings_match = (
             allocation.mode_id == normalized_mode
@@ -620,26 +631,15 @@ class DedicatedServerSpawner:
                 normalized_mode == allocation.mode_id
                 and normalized_map_id == allocation.map_id
             )
-            verified_target = room_target_for(normalized_mode, normalized_map_id)
-            if verified_target is not None:
-                verified_map, verified_game = verified_target
-                allocation.map_name = desired_map or verified_map
-                if normalized_mode in TANK_GAME_MODE_IDS:
-                    allocation.map_name = verified_map
-                allocation.game_class = verified_game
-            elif desired_map:
-                allocation.map_name = desired_map
-                allocation.game_class = MODE_GAME_CLASSES.get(
-                    normalized_mode, self.config.game_class
-                )
-            elif not same_target:
-                # Do not carry a stale cooked world into a different, unresolved
-                # ModeId/MapId pair.  arm_lobby() will fail closed with a precise
-                # diagnostic instead of advertising a dead DS endpoint.
-                allocation.map_name = ""
-                allocation.game_class = MODE_GAME_CLASSES.get(
-                    normalized_mode, self.config.game_class
-                )
+            world, game = resolve_room_target(
+                mode_id, map_id, desired_map, self.config.game_class, sub_mode_id
+            )
+            # An unresolved map with the same target keeps the old world; a
+            # different unresolved target must not inherit a stale cooked world
+            # (arm_lobby() then fails closed with a precise diagnostic).
+            if world or not same_target:
+                allocation.map_name = world
+                allocation.game_class = game
 
             allocation.mode_id = normalized_mode
             allocation.map_id = normalized_map_id
@@ -740,7 +740,7 @@ class DedicatedServerSpawner:
                     f"with fresh slot={slot} public={allocation.public_host}:{allocation.public_port} "
                     f"afdev={allocation.target_host}:{allocation.target_port}"
                 )
-            if allocation.state in ("ARMED", "STARTING", "READY") and allocation.bridge_proc is not None:
+            if allocation.state in ("ARMED", "STARTING", "AFDEV_READY", "READY") and allocation.bridge_proc is not None:
                 return allocation
             if allocation.state == "FAILED":
                 raise DSStartupError(allocation.last_error or "bridge/AFDEV startup failed")
@@ -861,11 +861,9 @@ class DedicatedServerSpawner:
         while time.time() < deadline:
             if allocation.bridge_proc is not None and allocation.bridge_proc.poll() is not None:
                 detail = self._tail_file(p["bridge_log"])
-                with self._lock:
-                    allocation.state = "FAILED"
-                    allocation.last_error = f"bridge exited rc={allocation.bridge_proc.returncode}" + (f"; log_tail={detail}" if detail else "")
-                    self._write_snapshot_locked()
-                raise DSStartupError(allocation.last_error)
+                error = f"bridge exited rc={allocation.bridge_proc.returncode}" + (f"; log_tail={detail}" if detail else "")
+                self.end_round(room_id, reason=error)
+                raise DSStartupError(error)
             payload = self._read_json(p["state_file"])
             if payload.get("state") == "LISTENING":
                 self._log(
@@ -882,12 +880,9 @@ class DedicatedServerSpawner:
             time.sleep(0.02)
 
         detail = self._tail_file(p["bridge_log"])
-        with self._lock:
-            allocation.state = "FAILED"
-            allocation.last_error = f"bridge did not reach LISTENING in {self.config.bridge_ready_timeout:.2f}s" + (f"; log_tail={detail}" if detail else "")
-            self._write_snapshot_locked()
-        self._stop_allocation(allocation)
-        raise DSStartupError(allocation.last_error)
+        error = f"bridge did not reach LISTENING in {self.config.bridge_ready_timeout:.2f}s" + (f"; log_tail={detail}" if detail else "")
+        self.end_round(room_id, reason=error)
+        raise DSStartupError(error)
 
     # Compatibility alias: in r10 'prewarm' means bridge-arm only and never
     # starts AFDEV. The stable server no longer calls it from A10A.
@@ -921,6 +916,8 @@ class DedicatedServerSpawner:
                     allocation.last_error = f"bridge exited rc={proc.returncode}" + (f"; log_tail={detail}" if detail else "")
                     self._write_snapshot_locked()
                 self._log(f"room={allocation.room_id} bridge FAILED: {allocation.last_error}")
+                if self.allocation_for_room(allocation.room_id) is allocation:
+                    self.end_round(allocation.room_id, reason=allocation.last_error)
                 return
 
             payload = self._read_json(paths["state_file"])
@@ -1000,6 +997,8 @@ class DedicatedServerSpawner:
                                 pass
                         allocation.last_error = detail
                         self._log(f"room={allocation.room_id} lazy AFDEV FAILED: {detail}")
+                        if self.allocation_for_room(allocation.room_id) is allocation:
+                            self.end_round(allocation.room_id, reason=detail)
                         return
                     last_state = state
             time.sleep(0.10)
@@ -1082,12 +1081,16 @@ class DedicatedServerSpawner:
         )
         return result
 
-    def end_round(self, room_id: int, reason: str = "last match player left") -> bool:
+    def end_round(
+        self, room_id: int, reason: str = "last match player left", *, only_if_idle: bool = False
+    ) -> bool:
         """Stop this room's DS processes without deleting the lobby membership."""
         room_id = int(room_id)
         with self._lock:
             a = self._allocations.get(room_id)
             if a is None or a.state == "RELEASED":
+                return False
+            if only_if_idle and a.match_players:
                 return False
             if a.state == "ROUND_ENDED":
                 return True
@@ -1132,9 +1135,11 @@ class DedicatedServerSpawner:
             f"remaining={remaining} players={result['match_players']} reason={reason}"
         )
         if should_end:
-            self.end_round(room_id, reason=f"{reason}; last match player left")
-            result["ended_round"] = True
-            result["state"] = "ROUND_ENDED"
+            result["ended_round"] = self.end_round(
+                room_id, reason=f"{reason}; last match player left", only_if_idle=True
+            )
+            if result["ended_round"]:
+                result["state"] = "ROUND_ENDED"
         return result
 
     def remove_room_player(
@@ -1202,9 +1207,13 @@ class DedicatedServerSpawner:
         if transfer:
             self._log(f"room owner transferred room={room_id} {transfer[0]} -> {transfer[1]}")
         if action == "RELEASE_ROOM":
-            self.release_lobby(room_id, reason=f"{reason}; last room player left")
+            self.release_lobby(
+                room_id, reason=f"{reason}; last room player left", only_if_empty=True
+            )
         elif action == "END_ROUND":
-            self.end_round(room_id, reason=f"{reason}; no match players remain")
+            result["ended_round"] = self.end_round(
+                room_id, reason=f"{reason}; no match players remain", only_if_idle=True
+            )
         return result
 
     def wait_ready(self, room_id: int, timeout: Optional[float] = None) -> DSAllocation:
@@ -1248,7 +1257,9 @@ class DedicatedServerSpawner:
         except Exception:
             pass
 
-    def release_lobby(self, room_id: int, reason: str = "room released") -> bool:
+    def release_lobby(
+        self, room_id: int, reason: str = "room released", *, only_if_empty: bool = False
+    ) -> bool:
         room_id = int(room_id)
         with self._lock:
             allocation = self._allocations.get(room_id)
@@ -1256,6 +1267,8 @@ class DedicatedServerSpawner:
                 return False
             if allocation.state == "RELEASED":
                 return True
+            if only_if_empty and allocation.room_players:
+                return False
             allocation.state = "RELEASED"
             allocation.last_error = reason
             self._owner_to_room.pop(int(allocation.owner_id), None)
@@ -1268,8 +1281,11 @@ class DedicatedServerSpawner:
 
     def _stop_allocation(self, allocation: DSAllocation) -> None:
         p = self._instance_paths(allocation)
-        afdev_pid = allocation.afdev_pid or self._read_pid(p["pid_file"])
-        loader_pid = allocation.loader_pid or self._read_pid(p["loader_pid_file"])
+        # PID files are only trustworthy for a round this allocation armed; a
+        # stale file from a previous occupant of the slot could name a reused PID.
+        armed = allocation.armed_at is not None
+        afdev_pid = allocation.afdev_pid or (self._read_pid(p["pid_file"]) if armed else None)
+        loader_pid = allocation.loader_pid or (self._read_pid(p["loader_pid_file"]) if armed else None)
         bridge_pid = allocation.bridge_pid or (allocation.bridge_proc.pid if allocation.bridge_proc is not None else None)
 
         self._log(
@@ -1280,6 +1296,8 @@ class DedicatedServerSpawner:
         # Kill the heavy child first, then its Python monitor, then the bridge.
         self._kill_pid(afdev_pid)
         self._kill_pid(loader_pid)
+        for key in ("pid_file", "loader_pid_file"):
+            p[key].unlink(missing_ok=True)
 
         proc = allocation.bridge_proc
         if proc is not None:

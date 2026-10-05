@@ -39,7 +39,7 @@ class PVEMapSelectionTests(unittest.TestCase):
         spawner = self.text("server/assaultfire_ds_spawner.py")
         self.assertIn('map_name=settings.get("map_string") or None', server)
         self.assertIn('map_name: Optional[str] = None', spawner)
-        self.assertIn('allocation.map_name = desired_map or verified_map', spawner)
+        self.assertIn('resolve_room_target(', spawner)
         self.assertIn('"--map", allocation.map_name', spawner)
         self.assertIn('"--game", allocation.game_class', spawner)
 
