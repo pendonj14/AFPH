@@ -1,0 +1,15 @@
+<!-- dir server ip ,port   -->
+<Server>
+    <DirServer count="2" SuccessfulServerID="1" SuccessfulPort="9010">
+        <Server1 Catalog="" host="tdir.levelupgames.ph" />
+        <Server2 Catalog="" host="202.57.118.62" />
+        <portlist count="1" port1="9010">0</portlist>
+    </DirServer>
+    <!-- Role  server ip ,port   -->
+    <RoleServer count="2" SuccessfulServerID="1" SuccessfulPort="65005">
+        <Server1 Catalog="" host="tdir.levelupgames.ph" />
+        <Server2 Catalog="" host="202.57.118.62" />
+        <portlist count="1" port1="65005">0</portlist>
+    </RoleServer>
+</Server>
+

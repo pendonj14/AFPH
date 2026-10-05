@@ -1,0 +1,7 @@
+﻿<!-- ap server ip ,port   -->
+<Server>
+    <APServer count="1" SuccessfulServerID="1" SuccessfulPort="8000">
+        <Server1 Catalog="" host="tauthproxy.levelupgames.ph" />
+        <portlist count="1" port1="8000">0</portlist>
+    </APServer>
+</Server>

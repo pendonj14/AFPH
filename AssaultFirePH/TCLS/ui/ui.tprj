@@ -1,0 +1,20 @@
+﻿<?xml version="1.0" encoding="UTF-8" ?>
+<TPFProject>
+    <Config Res="Res" Style="Style" Colorlib="ColorLib" Layout="Layout" Scripte="Script" Localization="Localization" />
+    <Layout>
+        <File>Layout\Container_Loading.tpf</File>
+        <File>Layout\Container_Login.tpf</File>
+        <File>Layout\Container_Update.tpf</File>
+        <File>Layout\Dlg_ComBig1.tpf</File>
+        <File>Layout\Dlg_ComBig2.tpf</File>
+        <File>Layout\Dlg_ComSmall1.tpf</File>
+        <File>Layout\Dlg_ComSmall2.tpf</File>
+        <File>Layout\Dlg_Connecting.tpf</File>
+        <File>Layout\Dlg_Login_Yzm.tpf</File>
+        <File>Layout\MainDlg_SeleSrv.tpf</File>
+        <File>Layout\MainFrame.tpf</File>
+        <File>Layout\registeridentity.tpf</File>
+        <File>Layout\Dlg_AutoLogin.tpf</File>
+    </Layout>
+    <Script />
+</TPFProject>

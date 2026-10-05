@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="gb2312" ?>
+<Server>
+    <versionserver version="1" count="2" SuccessfulServerID="1" SuccessfulPort="9060">
+        <server1 host="tversion.levelupgames.ph" />
+        <server2 host="202.57.118.62" />
+        <portlist count="1" port1="9060" />
+    </versionserver>
+</Server>
+ 
