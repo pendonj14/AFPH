@@ -3406,7 +3406,7 @@ def _v48_build_geo_zonelist(seq, port=TGAME_ZONE_PORT, ping_ms=0xfffffffe):
         + zone
         + _v48_i16(1)  # EGEODecisionMethod_Sequential
     )
-    # Old raw-string body was 0x3A.  The u32 DomainLen adds four bytes.
+    # Raw-string body 0x3A plus the u32 DomainLen is 62 bytes for 127.0.0.1.
     if len(body) != 48 + len(_v50_geo_tdr_string(PUBLIC_HOST, 128)):
         raise AssertionError(f"unexpected GEO ZoneList body len={len(body)}")
     return (
@@ -6911,9 +6911,7 @@ def _v74_build_main_channel_list_response():
         + _v50_geo_tdr_string("Local Channel", 32)
         + _v48_u32(100)
         + _v48_u32(1)
-        + _v48_u32(_v143b_tdr_ipv4(PUBLIC_HOST))
-        + _v48_u32(_v143b_tdr_ipv4(PUBLIC_HOST))
-        + _v48_u32(_v143b_tdr_ipv4(PUBLIC_HOST))
+        + _v48_u32(_v143b_tdr_ipv4(PUBLIC_HOST)) * 3
     )
 
     body = (
@@ -7031,7 +7029,7 @@ def _v76_build_zone_channel_list_response(main_channel_id=1):
         + zone
     )
 
-    # Wire body is 84 bytes for this one-zone/one-channel response.
+    # Wire body is 84 bytes for 127.0.0.1 in this one-zone/one-channel response.
     # v75 incorrectly used 16-bit ChannelCount/FalseChnlCount and produced 80B,
     # shifting every field after Port by 2 bytes at each count.
     if len(body) != 70 + len(_v50_geo_tdr_string(PUBLIC_HOST, 128)):

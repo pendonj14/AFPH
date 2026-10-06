@@ -35,12 +35,7 @@ calls = {
     "a133": lambda: s._v76_build_zone_channel_list_response(),
     "a356": lambda: s._v74_build_main_channel_list_response(),
 }
-out = {}
-for name, fn in calls.items():
-    try:
-        out[name] = {"hex": fn().hex()}
-    except Exception as exc:
-        out[name] = {"error": f"{type(exc).__name__}: {exc}"}
+out = {name: fn().hex() for name, fn in calls.items()}
 print("RESULT " + json.dumps(out))
 '''
 
@@ -57,7 +52,6 @@ def run_server_code(code: str, public_host: str | None = None) -> subprocess.Com
             AF_LOG_PATH=str(Path(td) / "server.log"),
             AF_RUNTIME_MODE="production",
             AF_DEV_WEB="0",
-            AF_DS_RUNTIME_DIR=str(Path(td) / "ds_runtime"),
         )
         if public_host is not None:
             env["AF_PUBLIC_HOST"] = public_host
@@ -67,7 +61,7 @@ def run_server_code(code: str, public_host: str | None = None) -> subprocess.Com
         )
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def build_outputs(public_host: str | None) -> dict:
     proc = run_server_code(BUILD_CODE, public_host)
     if proc.returncode != 0:
@@ -89,10 +83,7 @@ class PublicHostWireTests(unittest.TestCase):
     HOSTS = ("100.64.1.2", "100.101.102.103")
 
     def built(self, host: str | None, name: str) -> bytes:
-        result = build_outputs(host)[name]
-        if "error" in result:
-            self.fail(f"{name} builder raised for AF_PUBLIC_HOST={host!r}: {result['error']}")
-        return bytes.fromhex(result["hex"])
+        return bytes.fromhex(build_outputs(host)[name])
 
     def assert_no_loopback(self, out: bytes, name: str, host: str) -> None:
         for needle in LOOPBACK_BYTES:
@@ -102,15 +93,11 @@ class PublicHostWireTests(unittest.TestCase):
         self.assertEqual(body_len(out), expected, f"{name} BodyLen for {host}")
         self.assertEqual(len(out) - 8, expected, f"{name} actual body length for {host}")
 
-    def test_unset_matches_golden(self):
-        for name, golden in GOLDEN.items():
-            with self.subTest(builder=name):
-                self.assertEqual(self.built(None, name).hex(), golden)
-
-    def test_loopback_setting_matches_golden(self):
-        for name, golden in GOLDEN.items():
-            with self.subTest(builder=name):
-                self.assertEqual(self.built("127.0.0.1", name).hex(), golden)
+    def test_default_hosts_match_golden(self):
+        for host in (None, "127.0.0.1"):
+            for name, golden in GOLDEN.items():
+                with self.subTest(host=host, builder=name):
+                    self.assertEqual(self.built(host, name).hex(), golden)
 
     def test_dir_leaf_advertises_host(self):
         for host in self.HOSTS:
@@ -168,41 +155,28 @@ class PublicHostValidationTests(unittest.TestCase):
                 proc = run_server_code("import assaultfire_server_v143b", value)
                 output = proc.stdout + proc.stderr
                 self.assertNotEqual(proc.returncode, 0, f"import accepted AF_PUBLIC_HOST={value!r}")
-                self.assertIn("AF_PUBLIC_HOST", output)
+                self.assertIn("[CONFIG] AF_PUBLIC_HOST", output)
                 self.assertIn(value, output)
+                self.assertNotIn("Traceback", output)
 
 
 class SpawnerPublicHostTests(unittest.TestCase):
-    def resolved(self, **env: str) -> str:
-        with mock.patch.dict(os.environ):
-            os.environ.pop("AF_PUBLIC_HOST", None)
-            os.environ.pop("AF_DS_PUBLIC_HOST", None)
-            os.environ.update(env)
-            return SpawnerConfig.from_env().public_host
+    CASES = (
+        ({}, "127.0.0.1"),
+        ({"AF_PUBLIC_HOST": "100.64.1.2"}, "100.64.1.2"),
+        ({"AF_PUBLIC_HOST": "100.64.1.2", "AF_DS_PUBLIC_HOST": "100.64.9.9"}, "100.64.9.9"),
+        ({"AF_PUBLIC_HOST": ""}, "127.0.0.1"),
+        ({"AF_PUBLIC_HOST": " 100.64.1.2 "}, "100.64.1.2"),
+        ({"AF_DS_PUBLIC_HOST": "  ", "AF_PUBLIC_HOST": "100.64.1.2"}, "100.64.1.2"),
+    )
 
-    def test_both_unset_is_loopback(self):
-        self.assertEqual(self.resolved(), "127.0.0.1")
-
-    def test_public_host_is_used(self):
-        self.assertEqual(self.resolved(AF_PUBLIC_HOST="100.64.1.2"), "100.64.1.2")
-
-    def test_ds_public_host_wins(self):
-        self.assertEqual(
-            self.resolved(AF_PUBLIC_HOST="100.64.1.2", AF_DS_PUBLIC_HOST="100.64.9.9"),
-            "100.64.9.9",
-        )
-
-    def test_empty_public_host_is_loopback(self):
-        self.assertEqual(self.resolved(AF_PUBLIC_HOST=""), "127.0.0.1")
-
-    def test_public_host_is_stripped(self):
-        self.assertEqual(self.resolved(AF_PUBLIC_HOST=" 100.64.1.2 "), "100.64.1.2")
-
-    def test_blank_ds_public_host_falls_back_to_public_host(self):
-        self.assertEqual(
-            self.resolved(AF_DS_PUBLIC_HOST="  ", AF_PUBLIC_HOST="100.64.1.2"),
-            "100.64.1.2",
-        )
+    def test_precedence(self):
+        for env, want in self.CASES:
+            with self.subTest(env=env), mock.patch.dict(os.environ):
+                os.environ.pop("AF_PUBLIC_HOST", None)
+                os.environ.pop("AF_DS_PUBLIC_HOST", None)
+                os.environ.update(env)
+                self.assertEqual(SpawnerConfig.from_env().public_host, want)
 
 
 class PublicHostSourcePinTests(unittest.TestCase):
