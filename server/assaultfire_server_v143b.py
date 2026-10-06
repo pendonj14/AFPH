@@ -43,6 +43,7 @@ from assaultfire_room_registry import (
 
 from assaultfire_preflight import (
     default_preflight_status_path,
+    parse_ipv4_setting,
     run_server_preflight,
     update_launch_gate_status,
 )
@@ -528,7 +529,10 @@ V143B_ZONE_ERR_NO_DS_CAPACITY = int(
 
 # Address advertised to clients (directory/zone/ping/match). Set AF_PUBLIC_HOST
 # to the Tailscale/VPS IP for remote players; default keeps single-PC play.
-PUBLIC_HOST = os.environ.get("AF_PUBLIC_HOST", "127.0.0.1").strip() or "127.0.0.1"
+try:
+    PUBLIC_HOST = parse_ipv4_setting("AF_PUBLIC_HOST", os.environ.get("AF_PUBLIC_HOST"))
+except ValueError as exc:
+    raise SystemExit(f"[CONFIG] {exc}")
 
 
 def _v143b_tdr_ipv4(host):
@@ -3171,8 +3175,8 @@ def tgame_build_geo_pinglist_response(seq, max_delay_ms=1000):
     # Domain="127.0.0.1\0" is 10 bytes plus a 4-byte BE length prefix.
     # PingInfo is therefore 26 bytes and the complete response body is 34
     # bytes (0x22).  This exact layout returned EAX=0 from the live TDR decoder.
-    # ponytail: size is only fixed (26/34) for 127.0.0.1; Domain is length-prefixed.
-    if PUBLIC_HOST == "127.0.0.1" and (len(ping_info) != 26 or len(body) != 34):
+    expected = 12 + len(_tdr_string_ascii(domain))
+    if len(ping_info) != expected or len(body) != expected + 8:
         raise AssertionError(
             f"unexpected GEO ping sizes: ping_info={len(ping_info)} body={len(body)}"
         )
@@ -3403,7 +3407,7 @@ def _v48_build_geo_zonelist(seq, port=TGAME_ZONE_PORT, ping_ms=0xfffffffe):
         + _v48_i16(1)  # EGEODecisionMethod_Sequential
     )
     # Old raw-string body was 0x3A.  The u32 DomainLen adds four bytes.
-    if len(body) != 62:
+    if len(body) != 48 + len(_v50_geo_tdr_string(PUBLIC_HOST, 128)):
         raise AssertionError(f"unexpected GEO ZoneList body len={len(body)}")
     return (
         _v48_u16(TGAME_GEO_MAGIC)
@@ -6907,9 +6911,9 @@ def _v74_build_main_channel_list_response():
         + _v50_geo_tdr_string("Local Channel", 32)
         + _v48_u32(100)
         + _v48_u32(1)
-        + _v48_u32(0x0100007F)
-        + _v48_u32(0x0100007F)
-        + _v48_u32(0x0100007F)
+        + _v48_u32(_v143b_tdr_ipv4(PUBLIC_HOST))
+        + _v48_u32(_v143b_tdr_ipv4(PUBLIC_HOST))
+        + _v48_u32(_v143b_tdr_ipv4(PUBLIC_HOST))
     )
 
     body = (
@@ -7030,7 +7034,7 @@ def _v76_build_zone_channel_list_response(main_channel_id=1):
     # Wire body is 84 bytes for this one-zone/one-channel response.
     # v75 incorrectly used 16-bit ChannelCount/FalseChnlCount and produced 80B,
     # shifting every field after Port by 2 bytes at each count.
-    if len(body) != 84:
+    if len(body) != 70 + len(_v50_geo_tdr_string(PUBLIC_HOST, 128)):
         raise AssertionError(f"unexpected A133 body len={len(body)}")
 
     return _v62_build_server_app(
@@ -8078,7 +8082,7 @@ def _v132_send_pve_afdev_handoff(
         )
         return True
 
-    handoff_host = PUBLIC_HOST
+    handoff_host = V143B_DS_CONFIG.public_host
     handoff_port = TGAME_AFDEV_PORT
     allocation = None
 

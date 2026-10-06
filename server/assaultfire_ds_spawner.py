@@ -209,7 +209,7 @@ class SpawnerConfig:
         return cls(
             enabled=env_bool("AF_DS_SPAWNER_ENABLED", True),
             max_instances=max(1, int(os.environ.get("AF_DS_MAX_INSTANCES", "4"))),
-            public_host=os.environ.get("AF_DS_PUBLIC_HOST") or os.environ.get("AF_PUBLIC_HOST", "127.0.0.1"),
+            public_host=(os.environ.get("AF_DS_PUBLIC_HOST") or "").strip() or (os.environ.get("AF_PUBLIC_HOST") or "").strip() or "127.0.0.1",
             public_port_base=int(os.environ.get("AF_DS_PUBLIC_PORT_BASE", "65008")),
             target_host=os.environ.get("AF_DS_TARGET_HOST", "127.0.0.1"),
             target_port_base=int(os.environ.get("AF_DS_TARGET_PORT_BASE", "7777")),
