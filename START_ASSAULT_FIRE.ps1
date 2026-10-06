@@ -24,7 +24,9 @@ private copy and receives the verified native ServerMove-v4 AFDEV patch.
 param(
     [switch]$SetupOnly,
     [switch]$SkipPythonInstall,
-    [switch]$KeepServer
+    [switch]$KeepServer,
+    [string]$RemoteHost = "",
+    [string]$ApClientSha256 = ""
 )
 
 function Test-IsAdministrator {
@@ -65,6 +67,8 @@ if (-not (Test-IsAdministrator)) {
     if ($SetupOnly) { $elevatedArguments += "-SetupOnly" }
     if ($SkipPythonInstall) { $elevatedArguments += "-SkipPythonInstall" }
     if ($KeepServer) { $elevatedArguments += "-KeepServer" }
+    if ($RemoteHost) { $elevatedArguments += @("-RemoteHost", $RemoteHost) }
+    if ($ApClientSha256) { $elevatedArguments += @("-ApClientSha256", $ApClientSha256) }
 
     Write-Host "[UAC] Requesting Administrator access for the one-click launcher..."
     try {
@@ -84,6 +88,7 @@ $LAUNCHER_REVISION = "2026-10-05-oneclick-v36-servermove-v4"
 $EXPECTED_TGAME_SHA256 = "B4273F2658CA94EEBC559A997FDFCD02D51E77CE75B892250C1DB7FB80C70B51"
 $TCLS_ORIGINAL_SHA256 = "13EAD403452E0F25CF00658369BF4BF5FF34ED1B16027F7833FB27D398386CD1"
 $TCLS_PATCHED_SHA256  = "3FF351E0ADB594D7544E28DB2E966A6D6EB548E9DF70DAAF4DAF58F2EE438D56"
+$IPV4_PATTERN = '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
 
 $script:LAUNCHER_CONFIG_PATH = Join-Path $PSScriptRoot "launcher.config.json"
 $script:LauncherConfig = $null
@@ -776,6 +781,7 @@ $self=$MyInvocation.MyCommand.Path; if(-not $self){Stop-WithMessage "Could not d
 $consoleHelper=Join-Path $PSScriptRoot "tools\setup\af_console_nonblocking.ps1"; if(Test-Path -LiteralPath $consoleHelper -PathType Leaf){. $consoleHelper; Disable-AFConsoleBlockingSelection; Write-Host "[AF-ONECLICK] Console mouse selection: NON-BLOCKING"}else{Write-Host "[AF-ONECLICK] WARNING: console non-blocking helper is missing." -ForegroundColor Yellow}
 try{
     $expectedIp="127.0.0.1"
+    if($RemoteHost){if($RemoteHost -notmatch $IPV4_PATTERN){throw "-RemoteHost must be an IPv4 address like 100.64.1.2; got '$RemoteHost'"}; if($ApClientSha256 -notmatch '^[0-9A-Fa-f]{64}$'){throw "-ApClientSha256 is required with -RemoteHost: pass the 64-hex SHA-256 of the host's TCLS\config\APClient.dat."}; $expectedIp=$RemoteHost}
     $repoRoot=Split-Path -Parent $self; if(-not(Test-Path -LiteralPath (Join-Path $repoRoot "server\assaultfire_server_v143b.py") -PathType Leaf)){throw "START_ASSAULT_FIRE.ps1 must stay in the root of the af-emulator folder."}
     $gameRoot=Find-GameRoot $repoRoot; if(-not $gameRoot){throw("Could not find the Assault Fire PH game root. Put the ENTIRE af-emulator folder inside your "+"Assault Fire game folder, or copy the emulator contents directly into the game root. "+"The game root must contain TCLS\client.exe, TCLS\Tenio\TCLS.dll, and Binaries\Win32\TGame.exe.")}
     $win32=Join-Path $gameRoot "Binaries\Win32"; $clientExe=Join-Path $gameRoot "TCLS\client.exe"; Write-Host "[OK] Emulator : $repoRoot" -ForegroundColor Green; Write-Host "[OK] Game root: $gameRoot" -ForegroundColor Green
@@ -783,12 +789,17 @@ try{
     Write-Step "Checking Python and emulator dependencies"; $bootstrapPython=Ensure-SupportedPython $repoRoot $gameRoot; $venvPython=Ensure-Venv $repoRoot $gameRoot $bootstrapPython
     Write-Step "Checking the supported TGame build and patch signature"; Ensure-AFDev $gameRoot $venvPython $repoRoot
     Write-Step "Checking TCLS.dll"; Ensure-PermanentTCLS $repoRoot $gameRoot $venvPython
-    Write-Step "Preparing the local RSA/APClient pair"; Ensure-Keys $repoRoot $gameRoot $venvPython
+    if(-not $RemoteHost){Write-Step "Preparing the local RSA/APClient pair"; Ensure-Keys $repoRoot $gameRoot $venvPython}
     Write-Step "Checking Windows hosts mappings"; Ensure-Hosts $repoRoot $expectedIp
     $env:AF_CLIENT_ROOT=$gameRoot; $env:AF_GAME_DIR=$win32; $env:AF_DS_SPAWNER_ENABLED="1"
     Write-Host ""; Write-Host "[READY] First-time setup checks are complete." -ForegroundColor Green; Write-Host "[READY] PvE DS spawning is enabled."; Write-Host "[READY] This launcher and its runtime components are running as Administrator."; Write-Host "[READY] You no longer need to set AF_CLIENT_ROOT / AF_GAME_DIR manually."
     if($SetupOnly){Write-Host ""; Write-Host "-SetupOnly was selected, so the server/client will not be launched."; Read-Host "Press Enter to close"; exit 0}
-    Write-Step "Starting the emulator server"; $statusPath=Join-Path $repoRoot "runtime\preflight_status.json"; Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
+    $serverWindow=$null
+    if($RemoteHost){
+        Write-Step "Checking this PC for remote play"; $statusPath=Join-Path $repoRoot "runtime\preflight_status.json"; Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
+        & $venvPython (Join-Path $repoRoot "server\assaultfire_preflight.py") "--remote-host",$RemoteHost,"--apclient-sha256",$ApClientSha256; if($LASTEXITCODE -ne 0){throw "Remote preflight failed with exit code $LASTEXITCODE. Fix the [PREFLIGHT] errors above and run again."}
+        $status=Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json; Write-Host "[OK] Remote launch gate is UNLOCKED. No local server runs on this PC. The game connects to the host at $RemoteHost." -ForegroundColor Green
+    }else{Write-Step "Starting the emulator server"; $statusPath=Join-Path $repoRoot "runtime\preflight_status.json"; Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
     $serverScript=Join-Path $repoRoot "server\assaultfire_server_v143b.py"; $serverCommand=(". "+(Quote-PS $consoleHelper)+"; "+"Disable-AFConsoleBlockingSelection; "+'$env:AF_CLIENT_ROOT='+(Quote-PS $gameRoot)+"; "+'$env:AF_GAME_DIR='+(Quote-PS $win32)+"; "+'$env:AF_DS_SPAWNER_ENABLED='+(Quote-PS "1")+"; "+'$env:AF_DS_PYTHON='+(Quote-PS $venvPython)+"; "+'$env:AF_RUNTIME_MODE='+(Quote-PS "development")+"; "+'$env:AF_DEV_WEB='+(Quote-PS "1")+"; "+'$env:AF_WEB_OPEN_BROWSER='+(Quote-PS "1")+"; "+"Set-Location -LiteralPath "+(Quote-PS $repoRoot)+"; "+"Write-Host '[AF-ADMIN] Emulator server running elevated.' -ForegroundColor Green; "+"& "+(Quote-PS $venvPython)+" "+(Quote-PS $serverScript))
     Write-Host "[ADMIN] The emulator server inherits this launcher's Administrator token." -ForegroundColor Green
     try{$serverWindow=Start-Process -FilePath $currentPowerShellExe -WorkingDirectory $repoRoot -PassThru -ArgumentList @("-NoProfile","-NoExit","-ExecutionPolicy","Bypass","-Command",$serverCommand)}catch{throw "Could not start the elevated emulator server: $($_.Exception.Message)"}
@@ -796,6 +807,7 @@ try{
     Write-Host "[ACCOUNT] First-time players must register on the local account page before signing in." -ForegroundColor Yellow
     Write-Host "[ACCOUNT] The page should open automatically. If not, copy the [WEB] Registration URL from the server window (usually http://127.0.0.1:8080/register)."
     Write-Host "[ACCOUNT] Use the same username and password in the Assault Fire launcher. Register only once for this server database."
+    }
     Write-Step "Starting the automatic TGame launch helper"
     $helper = Join-Path $repoRoot "tools\patches\patch_tcls_suspended_launch.py"
     $helperLog = Join-Path $gameRoot "af_tgame_launch_helper.log"

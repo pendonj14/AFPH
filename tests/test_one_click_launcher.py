@@ -428,5 +428,129 @@ class OneClickLauncherTests(unittest.TestCase):
         self.assertIsNotNone(assignment)
         self.assertLess(assignment.start(), s.index(call))
 
+    def remote_branch(self, s):
+        self.assertIn("if($RemoteHost){", s)
+        start = s.index('Write-Step "Starting the emulator server"')
+        return s[s.rindex("if($RemoteHost){", 0, start):start]
+
+    def test_launcher_declares_remote_mode_parameters(self):
+        s = self.text(SCRIPT)
+        block = s[s.index("param("):s.index("function Test-IsAdministrator")]
+        self.assertIn('[string]$RemoteHost = ""', block)
+        self.assertIn('[string]$ApClientSha256 = ""', block)
+        for switch in ("SetupOnly", "SkipPythonInstall", "KeepServer"):
+            self.assertIn("[switch]$" + switch, block)
+        declarations = [l.strip() for l in block.splitlines() if l.strip().startswith("[")]
+        for line in declarations[:-1]:
+            self.assertTrue(line.endswith(","), line)
+        self.assertFalse(declarations[-1].endswith(","), declarations[-1])
+
+    def test_launcher_forwards_remote_mode_arguments_through_elevation(self):
+        s = self.text(SCRIPT)
+        host = 'if ($RemoteHost) { $elevatedArguments += @("-RemoteHost", $RemoteHost) }'
+        sha = 'if ($ApClientSha256) { $elevatedArguments += @("-ApClientSha256", $ApClientSha256) }'
+        keep = 'if ($KeepServer) { $elevatedArguments += "-KeepServer" }'
+        launch = "Start-Process -FilePath $currentPowerShellExe -Verb RunAs"
+        self.assertIn(host, s)
+        self.assertIn(sha, s)
+        self.assertLess(s.index(keep), s.index(host))
+        self.assertLess(s.index(host), s.index(launch))
+        self.assertLess(s.index(sha), s.index(launch))
+
+    def test_launcher_defines_ipv4_pattern_before_main_flow(self):
+        s = self.text(SCRIPT)
+        pattern = r"$IPV4_PATTERN = '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'"
+        self.assertIn(pattern, s)
+        self.assertEqual(s.index("$IPV4_PATTERN"), s.index(pattern))
+        self.assertLess(s.index("$TCLS_PATCHED_SHA256"), s.index(pattern))
+        self.assertLess(s.index(pattern), s.index('Write-Step "Closing old Assault Fire processes"'))
+
+    def test_launcher_validates_remote_arguments_before_any_side_effect(self):
+        s = self.text(SCRIPT)
+        host_msg = "-RemoteHost must be an IPv4 address"
+        sha_msg = "-ApClientSha256 is required with -RemoteHost"
+        first_side_effect = s.index('Write-Step "Closing old Assault Fire processes"')
+        self.assertIn(host_msg, s)
+        self.assertIn(sha_msg, s)
+        self.assertLess(s.index(host_msg), first_side_effect)
+        self.assertLess(s.index(sha_msg), first_side_effect)
+        self.assertRegex(s, r"-RemoteHost must be an IPv4 address[^\n]*\$RemoteHost")
+        host_check = re.search(r"\$RemoteHost\s*-(?:not)?match\s*\$IPV4_PATTERN", s, re.I)
+        self.assertIsNotNone(host_check)
+        self.assertLess(host_check.start(), s.index(host_msg))
+        self.assertLess(s.index(host_msg) - host_check.start(), 300)
+        sha_check = re.search(r"\$ApClientSha256\s*-(?:not)?match\s*['\"][^'\"\n]*\{64\}", s, re.I)
+        self.assertIsNotNone(sha_check)
+        self.assertLess(sha_check.start(), s.index(sha_msg))
+        self.assertLess(s.index(sha_msg) - sha_check.start(), 300)
+
+    def test_launcher_maps_hosts_to_remote_host_when_given(self):
+        s = self.text(SCRIPT)
+        call = "Ensure-Hosts $repoRoot $expectedIp"
+        assignment = re.search(r"\$expectedIp\s*=[^\n]*\$RemoteHost", s)
+        self.assertIsNotNone(assignment)
+        self.assertLess(assignment.end(), s.index(call))
+        self.assertIsNone(
+            re.search(r'\$expectedIp\s*=\s*"127\.0\.0\.1"', s[assignment.end():s.index(call)])
+        )
+
+    def test_launcher_skips_key_generation_in_remote_mode(self):
+        s = self.text(SCRIPT)
+        guard = 'if(-not $RemoteHost){Write-Step "Preparing the local RSA/APClient pair"; Ensure-Keys $repoRoot $gameRoot $venvPython}'
+        self.assertIn(guard, s)
+        self.assertEqual(s.count("Ensure-Keys $repoRoot"), 1)
+        self.assertLess(s.index(guard), s.index("Ensure-Hosts $repoRoot $expectedIp"))
+
+    def test_local_server_start_is_the_else_branch_of_the_remote_check(self):
+        s = self.text(SCRIPT)
+        start = 'Write-Step "Starting the emulator server"'
+        self.assertIn("}else{" + start, s)
+        self.assertEqual(s.count(start), 1)
+        self.assertIn("if($RemoteHost){", s)
+        self.assertGreater(
+            s.rindex("if($RemoteHost){", 0, s.index(start)),
+            s.index("Ensure-Hosts $repoRoot $expectedIp"),
+        )
+        branch = s.rindex("if($RemoteHost){", 0, s.index(start))
+        self.assertLess(s.index("if($SetupOnly){"), branch)
+        self.assertLess(s.index("$env:AF_CLIENT_ROOT=$gameRoot"), branch)
+
+    def test_remote_branch_runs_preflight_cli_without_starting_a_server(self):
+        s = self.text(SCRIPT)
+        remote = self.remote_branch(s)
+        cli = '"--remote-host",$RemoteHost,"--apclient-sha256",$ApClientSha256'
+        self.assertIn(cli, s)
+        self.assertIn(cli, remote)
+        self.assertRegex(remote, r"&\s*\$venvPython[^\n]*assaultfire_preflight\.py[^\n]*" + re.escape(cli))
+        run = remote.index(cli)
+        self.assertLess(remote.index("Remove-Item -LiteralPath $statusPath"), run)
+        after = remote[remote.index("$LASTEXITCODE", run):]
+        self.assertIn("throw", after)
+        self.assertIn("$statusPath", after)
+        self.assertRegex(after, r"\$status\s*=")
+        for forbidden in (
+            "Start-Process",
+            "[ACCOUNT]",
+            "assaultfire_server_v143b.py",
+            "Ensure-Keys",
+            "PRIVATE.PEM",
+        ):
+            self.assertNotIn(forbidden, remote)
+
+    def test_local_server_start_block_is_unchanged_inside_else_branch(self):
+        s = self.text(SCRIPT)
+        marker = '}else{Write-Step "Starting the emulator server"'
+        self.assertIn(marker, s)
+        local = s[s.index(marker):s.index('Write-Step "Starting the automatic TGame launch helper"')]
+        for line in (
+            "$serverWindow=Start-Process -FilePath $currentPowerShellExe -WorkingDirectory $repoRoot -PassThru",
+            'Write-Host "[WAIT] Waiting for server preflight and listener gate..."; $status=Wait-ForLaunchGate $statusPath 45',
+            "[ACCOUNT] First-time players must register on the local account page before signing in.",
+            "[ACCOUNT] The page should open automatically. If not, copy the [WEB] Registration URL from the server window (usually http://127.0.0.1:8080/register).",
+            "[ACCOUNT] Use the same username and password in the Assault Fire launcher. Register only once for this server database.",
+        ):
+            self.assertIn(line, local)
+
+
 if __name__ == "__main__":
     unittest.main()
