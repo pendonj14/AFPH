@@ -530,23 +530,23 @@ function Ensure-Venv([string]$RepoRoot, [string]$GameRoot, [string]$BootstrapPyt
     return $venvPython
 }
 
-function Test-AFHosts {
+function Test-AFHosts([string]$ExpectedIp) {
     $hostsPath=Join-Path $env:SystemRoot "System32\drivers\etc\hosts"
     if (-not (Test-Path -LiteralPath $hostsPath -PathType Leaf)) { return $false }
     $wanted=@("tversion.levelupgames.ph","tauthproxy.levelupgames.ph","tdir.levelupgames.ph"); $seen=@{}; foreach($name in $wanted){$seen[$name]=@()}
     foreach($line in Get-Content -LiteralPath $hostsPath){$content=($line -split "#",2)[0].Trim(); if(-not $content){continue}; $parts=$content -split "\s+"; if($parts.Count -lt 2){continue}; $ip=$parts[0]; foreach($rawName in $parts[1..($parts.Count-1)]){$name=$rawName.ToLowerInvariant(); if($seen.ContainsKey($name)){$seen[$name]+=$ip}}}
-    foreach($name in $wanted){$values=@($seen[$name]); if($values.Count -ne 1 -or $values[0] -ne "127.0.0.1"){return $false}}
+    foreach($name in $wanted){$values=@($seen[$name]); if($values.Count -ne 1 -or $values[0] -ne $ExpectedIp){return $false}}
     return $true
 }
 
-function Ensure-Hosts([string]$RepoRoot) {
-    if (Test-AFHosts){Write-Host "[OK] Windows hosts mappings already point to 127.0.0.1." -ForegroundColor Green; return}
+function Ensure-Hosts([string]$RepoRoot,[string]$ExpectedIp) {
+    if (Test-AFHosts $ExpectedIp){Write-Host "[OK] Windows hosts mappings already point to $ExpectedIp." -ForegroundColor Green; return}
     $hostScript=Join-Path $RepoRoot "tools\setup\setup_assaultfire_hosts.ps1"; if(-not(Test-Path -LiteralPath $hostScript -PathType Leaf)){throw "Hosts setup helper is missing: $hostScript"}
     Write-Host "[SETUP] Repairing Assault Fire localhost mappings..."
     if(-not (Test-IsAdministrator)){throw "The launcher must be run as Administrator before repairing Windows hosts mappings."}
-    & $currentPowerShellExe -NoProfile -ExecutionPolicy Bypass -File $hostScript
+    & $currentPowerShellExe -NoProfile -ExecutionPolicy Bypass -File $hostScript -HostIp $ExpectedIp
     if($LASTEXITCODE -ne 0){throw "Windows hosts setup helper failed with exit code $LASTEXITCODE."}
-    ipconfig /flushdns | Out-Null; if(-not(Test-AFHosts)){throw "Windows hosts setup finished but the required 127.0.0.1 mappings did not verify."}; Write-Host "[OK] Hosts mappings verified." -ForegroundColor Green
+    ipconfig /flushdns | Out-Null; if(-not(Test-AFHosts $ExpectedIp)){throw "Windows hosts setup finished but the required $ExpectedIp mappings did not verify."}; Write-Host "[OK] Hosts mappings verified." -ForegroundColor Green
 }
 
 function Stop-RunningGameProcesses {
@@ -775,6 +775,7 @@ Write-Host "[AF-ONECLICK] Launcher revision: $LAUNCHER_REVISION"
 $self=$MyInvocation.MyCommand.Path; if(-not $self){Stop-WithMessage "Could not determine the launcher script path."}; $self=(Resolve-Path -LiteralPath $self).Path
 $consoleHelper=Join-Path $PSScriptRoot "tools\setup\af_console_nonblocking.ps1"; if(Test-Path -LiteralPath $consoleHelper -PathType Leaf){. $consoleHelper; Disable-AFConsoleBlockingSelection; Write-Host "[AF-ONECLICK] Console mouse selection: NON-BLOCKING"}else{Write-Host "[AF-ONECLICK] WARNING: console non-blocking helper is missing." -ForegroundColor Yellow}
 try{
+    $expectedIp="127.0.0.1"
     $repoRoot=Split-Path -Parent $self; if(-not(Test-Path -LiteralPath (Join-Path $repoRoot "server\assaultfire_server_v143b.py") -PathType Leaf)){throw "START_ASSAULT_FIRE.ps1 must stay in the root of the af-emulator folder."}
     $gameRoot=Find-GameRoot $repoRoot; if(-not $gameRoot){throw("Could not find the Assault Fire PH game root. Put the ENTIRE af-emulator folder inside your "+"Assault Fire game folder, or copy the emulator contents directly into the game root. "+"The game root must contain TCLS\client.exe, TCLS\Tenio\TCLS.dll, and Binaries\Win32\TGame.exe.")}
     $win32=Join-Path $gameRoot "Binaries\Win32"; $clientExe=Join-Path $gameRoot "TCLS\client.exe"; Write-Host "[OK] Emulator : $repoRoot" -ForegroundColor Green; Write-Host "[OK] Game root: $gameRoot" -ForegroundColor Green
@@ -783,7 +784,7 @@ try{
     Write-Step "Checking the supported TGame build and patch signature"; Ensure-AFDev $gameRoot $venvPython $repoRoot
     Write-Step "Checking TCLS.dll"; Ensure-PermanentTCLS $repoRoot $gameRoot $venvPython
     Write-Step "Preparing the local RSA/APClient pair"; Ensure-Keys $repoRoot $gameRoot $venvPython
-    Write-Step "Checking Windows hosts mappings"; Ensure-Hosts $repoRoot
+    Write-Step "Checking Windows hosts mappings"; Ensure-Hosts $repoRoot $expectedIp
     $env:AF_CLIENT_ROOT=$gameRoot; $env:AF_GAME_DIR=$win32; $env:AF_DS_SPAWNER_ENABLED="1"
     Write-Host ""; Write-Host "[READY] First-time setup checks are complete." -ForegroundColor Green; Write-Host "[READY] PvE DS spawning is enabled."; Write-Host "[READY] This launcher and its runtime components are running as Administrator."; Write-Host "[READY] You no longer need to set AF_CLIENT_ROOT / AF_GAME_DIR manually."
     if($SetupOnly){Write-Host ""; Write-Host "-SetupOnly was selected, so the server/client will not be launched."; Read-Host "Press Enter to close"; exit 0}

@@ -9,6 +9,8 @@
 #
 # It does not modify Assault Fire binaries or game assets.
 
+param([string]$HostIp = "127.0.0.1")
+
 $ErrorActionPreference = "Stop"
 
 $HostsPath = Join-Path $env:SystemRoot "System32\drivers\etc\hosts"
@@ -16,9 +18,9 @@ $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $BackupPath = "$HostsPath.assaultfire_$Stamp.bak"
 
 $Mappings = [ordered]@{
-    "tversion.levelupgames.ph"   = "127.0.0.1"
-    "tauthproxy.levelupgames.ph" = "127.0.0.1"
-    "tdir.levelupgames.ph"       = "127.0.0.1"
+    "tversion.levelupgames.ph"   = $HostIp
+    "tauthproxy.levelupgames.ph" = $HostIp
+    "tdir.levelupgames.ph"       = $HostIp
 }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

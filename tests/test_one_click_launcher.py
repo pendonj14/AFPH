@@ -5,6 +5,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "START_ASSAULT_FIRE.ps1"
 README = ROOT / "README.md"
+HOSTS_SCRIPT = ROOT / "tools" / "setup" / "setup_assaultfire_hosts.ps1"
 
 
 class OneClickLauncherTests(unittest.TestCase):
@@ -388,6 +389,44 @@ class OneClickLauncherTests(unittest.TestCase):
         self.assertLess(client_launch, armed_wait)
         self.assertLess(armed_wait, start_instructions)
         self.assertNotIn("Start-Sleep -Milliseconds 700", s)
+
+    def test_hosts_helper_takes_host_ip_parameter_defaulting_to_loopback(self):
+        s = self.text(HOSTS_SCRIPT)
+        self.assertIn("param(", s)
+        self.assertIn('[string]$HostIp = "127.0.0.1"', s)
+        self.assertLess(s.index("param("), s.index('[string]$HostIp = "127.0.0.1"'))
+        self.assertLess(s.index('[string]$HostIp = "127.0.0.1"'), s.index("$ErrorActionPreference"))
+
+    def test_hosts_helper_maps_all_three_names_to_host_ip(self):
+        s = self.text(HOSTS_SCRIPT)
+        self.assertIn('"tversion.levelupgames.ph"   = $HostIp', s)
+        self.assertRegex(s, r'"tauthproxy\.levelupgames\.ph"\s*=\s*\$HostIp')
+        self.assertRegex(s, r'"tdir\.levelupgames\.ph"\s*=\s*\$HostIp')
+        self.assertEqual(s.count('"127.0.0.1"'), 1)
+
+    def test_launcher_hosts_check_takes_expected_ip(self):
+        s = self.text(SCRIPT)
+        self.assertIn("function Test-AFHosts([string]$ExpectedIp)", s)
+        body = s[s.index("function Test-AFHosts"):s.index("function Ensure-Hosts")]
+        self.assertIn("$ExpectedIp", body)
+        self.assertNotIn("127.0.0.1", body)
+
+    def test_launcher_hosts_repair_passes_expected_ip_through(self):
+        s = self.text(SCRIPT)
+        self.assertIn("function Ensure-Hosts([string]$RepoRoot,[string]$ExpectedIp)", s)
+        body = s[s.index("function Ensure-Hosts"):s.index("function Stop-RunningGameProcesses")]
+        self.assertEqual(len(re.findall(r"Test-AFHosts\s+(?:-ExpectedIp\s+)?\$ExpectedIp", body)), 2)
+        self.assertIn("-File $hostScript -HostIp $ExpectedIp", body)
+        self.assertNotIn("127.0.0.1", body)
+
+    def test_launcher_main_flow_ensures_hosts_with_expected_ip(self):
+        s = self.text(SCRIPT)
+        call = "Ensure-Hosts $repoRoot $expectedIp"
+        self.assertIn(call, s)
+        self.assertEqual(s.count("Ensure-Hosts $repoRoot"), s.count(call))
+        assignment = re.search(r"\$expectedIp\s*=", s)
+        self.assertIsNotNone(assignment)
+        self.assertLess(assignment.start(), s.index(call))
 
 if __name__ == "__main__":
     unittest.main()
