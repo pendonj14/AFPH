@@ -2,11 +2,13 @@
 """Strict startup preflight for the supported Assault Fire PH local setup."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import ipaddress
 import json
 import os
 import socket
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,6 +145,24 @@ def check_key_pair(private_key_path: Path, apclient_path: Path) -> KeyCheck:
     )
 
 
+def check_apclient_hash(apclient_path: Path, expected_sha256: str) -> KeyCheck:
+    apclient = apclient_path.read_bytes()
+    actual = hashlib.sha256(apclient).hexdigest()
+    expected = expected_sha256.lower()
+    try:
+        key_size = public_key_numbers(apclient)[0].bit_length()
+    except (ValueError, TypeError):
+        key_size = None
+    return KeyCheck(
+        apclient_sha256=actual,
+        derived_public_sha256=expected,
+        exact_bytes_match=(actual == expected),
+        same_rsa_key=(actual == expected),
+        apclient_length=len(apclient),
+        rsa_key_size=key_size,
+    )
+
+
 def resolve_client_root(env: Mapping[str, str] | None = None) -> Path:
     env = os.environ if env is None else env
 
@@ -194,16 +214,21 @@ def parse_hosts_file(path: Path) -> dict[str, list[str]]:
 
 def evaluate_preflight(
     *,
-    private_key_path: Path,
+    private_key_path: Path | None,
     client_root: Path | None = None,
     hosts_path: Path | None = None,
     env: Mapping[str, str] | None = None,
     resolver: Callable[[str], str] = socket.gethostbyname,
     validated_tcls_sha256: str = VALIDATED_TCLS_SHA256,
     expected_ip: str | None = None,
+    apclient_sha256: str | None = None,
 ) -> PreflightReport:
     report = PreflightReport(
-        private_key_path=Path(private_key_path).expanduser().resolve(),
+        private_key_path=(
+            Path(private_key_path).expanduser().resolve()
+            if private_key_path is not None
+            else None
+        ),
         expected_ip=expected_ip or LOOPBACK_IPV4,
     )
 
@@ -220,11 +245,10 @@ def evaluate_preflight(
     report.tcls_path = report.client_root / "TCLS" / "Tenio" / "TCLS.dll"
     report.apclient_path = report.client_root / "TCLS" / "config" / "APClient.dat"
 
-    for label, path in (
-        ("TCLS.dll", report.tcls_path),
-        ("APClient.dat", report.apclient_path),
-        ("PRIVATE.PEM", report.private_key_path),
-    ):
+    required_files = [("TCLS.dll", report.tcls_path), ("APClient.dat", report.apclient_path)]
+    if apclient_sha256 is None:
+        required_files.append(("PRIVATE.PEM", report.private_key_path))
+    for label, path in required_files:
         if not path.is_file():
             report.errors.append(f"{label} not found: {path}")
 
@@ -248,19 +272,31 @@ def evaluate_preflight(
         except Exception as exc:
             report.errors.append(f"could not hash TCLS.dll: {exc}")
 
-    if report.apclient_path.is_file() and report.private_key_path.is_file():
+    if report.apclient_path.is_file() and (
+        apclient_sha256 is not None or report.private_key_path.is_file()
+    ):
         try:
-            report.key_check = check_key_pair(
-                report.private_key_path, report.apclient_path
-            )
-            if not report.key_check.exact_bytes_match:
-                report.errors.append(
-                    "APClient.dat exact byte match is NO; regenerate/install the matching public key"
+            if apclient_sha256 is not None:
+                report.key_check = check_apclient_hash(
+                    report.apclient_path, apclient_sha256
                 )
-            if not report.key_check.same_rsa_key:
-                report.errors.append(
-                    "APClient.dat and PRIVATE.PEM same RSA key is NO"
+                if not report.key_check.exact_bytes_match:
+                    report.errors.append(
+                        "APClient.dat SHA256 does not match the host's (--apclient-sha256); "
+                        "copy the host's APClient.dat"
+                    )
+            else:
+                report.key_check = check_key_pair(
+                    report.private_key_path, report.apclient_path
                 )
+                if not report.key_check.exact_bytes_match:
+                    report.errors.append(
+                        "APClient.dat exact byte match is NO; regenerate/install the matching public key"
+                    )
+                if not report.key_check.same_rsa_key:
+                    report.errors.append(
+                        "APClient.dat and PRIVATE.PEM same RSA key is NO"
+                    )
             if report.key_check.rsa_key_size != 1024:
                 report.errors.append(
                     f"RSA key size is {report.key_check.rsa_key_size!r}, expected 1024 bits"
@@ -333,16 +369,17 @@ def preflight_status_payload(
     log_written: bool = False,
     runtime_errors: list[str] | tuple[str, ...] = (),
     log_path: Path | None = None,
+    remote_host: str | None = None,
 ) -> dict:
     flags = preflight_check_flags(report)
     passed = bool(report.ok and all(flags.values()) and log_written)
-    launch_ready = bool(passed and listeners_ready)
+    launch_ready = bool(passed and (listeners_ready or remote_host))
     errors = list(report.errors)
     errors.extend(str(x) for x in runtime_errors if str(x).strip())
     return {
         "schema": PREFLIGHT_STATUS_SCHEMA,
         "checked_at_unix": time.time(),
-        "server_pid": os.getpid(),
+        "server_pid": None if remote_host else os.getpid(),
         "passed": passed,
         "listeners_ready": bool(listeners_ready),
         "log_written": bool(log_written),
@@ -362,6 +399,7 @@ def preflight_status_payload(
             for name in REQUIRED_HOSTS
         },
         "errors": errors,
+        **({"mode": "remote", "remote_host": remote_host} if remote_host else {}),
     }
 
 
@@ -392,6 +430,7 @@ def write_preflight_status(
     log_written: bool = False,
     runtime_errors: list[str] | tuple[str, ...] = (),
     log_path: Path | None = None,
+    remote_host: str | None = None,
 ) -> Path:
     path = _status_target(status_path)
     return _atomic_write_json(
@@ -402,6 +441,7 @@ def write_preflight_status(
             log_written=log_written,
             runtime_errors=runtime_errors,
             log_path=log_path,
+            remote_host=remote_host,
         ),
     )
 
@@ -448,6 +488,7 @@ def preflight_report_lines(
     *,
     listeners_ready: bool = False,
     log_written: bool = True,
+    remote: bool = False,
 ) -> list[str]:
     lines = [
         "[PREFLIGHT] Assault Fire PH startup checks",
@@ -500,8 +541,12 @@ def preflight_report_lines(
 
     if not checks_ok:
         lines.append(
-            "[PREFLIGHT] FAILED - server listeners will NOT start; "
-            "supported game launch helpers remain LOCKED."
+            (
+                "[PREFLIGHT] FAILED - remote client checks failed; "
+                if remote
+                else "[PREFLIGHT] FAILED - server listeners will NOT start; "
+            )
+            + "supported game launch helpers remain LOCKED."
         )
         if not log_written:
             lines.append(
@@ -516,8 +561,12 @@ def preflight_report_lines(
         )
     else:
         lines.append(
-            "[PREFLIGHT] PASS - all required checks and listeners succeeded; "
-            "supported game launch helpers are UNLOCKED."
+            (
+                "[PREFLIGHT] PASS - remote client checks succeeded; "
+                if remote
+                else "[PREFLIGHT] PASS - all required checks and listeners succeeded; "
+            )
+            + "supported game launch helpers are UNLOCKED."
         )
     return lines
 
@@ -527,12 +576,14 @@ def print_preflight_report(
     *,
     log_path: Path | None = None,
     listeners_ready: bool = False,
+    remote: bool = False,
 ) -> Path | None:
     # Print the check result first, then persist the exact same block.
     preview = preflight_report_lines(
         report,
         listeners_ready=listeners_ready,
         log_written=True,
+        remote=remote,
     )
     for line in preview:
         print(line, flush=True)
@@ -643,3 +694,59 @@ def run_server_preflight(
         and written is not None
     )
 
+
+def run_remote_preflight(
+    remote_host: str,
+    apclient_sha256: str,
+    *,
+    status_path: Path | None = None,
+    log_path: Path | None = None,
+    **evaluate_kwargs,
+) -> bool:
+    remote_host = parse_ipv4_setting("--remote-host", remote_host)
+    report = evaluate_preflight(
+        private_key_path=None,
+        apclient_sha256=apclient_sha256,
+        expected_ip=remote_host,
+        **evaluate_kwargs,
+    )
+
+    persisted_log = print_preflight_report(
+        report,
+        log_path=log_path,
+        listeners_ready=True,
+        remote=True,
+    )
+    log_written = persisted_log is not None
+    if not log_written:
+        report.errors.append(
+            "preflight report could not be persisted to a server log"
+        )
+
+    written = write_preflight_status(
+        report,
+        status_path=status_path,
+        listeners_ready=False,
+        log_written=log_written,
+        log_path=persisted_log,
+        remote_host=remote_host,
+    )
+    print(f"[PREFLIGHT] launch-gate status       : {written}", flush=True)
+
+    flags = preflight_check_flags(report)
+    return bool(report.ok and all(flags.values()) and log_written)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Remote client preflight for a friend PC joining a host over Tailscale."
+    )
+    parser.add_argument("--remote-host", required=True)
+    parser.add_argument("--apclient-sha256", required=True)
+    args = parser.parse_args()
+    try:
+        passed = run_remote_preflight(args.remote_host, args.apclient_sha256)
+    except Exception as exc:
+        print(f"[PREFLIGHT] FAILED - {exc}", file=sys.stderr, flush=True)
+        raise SystemExit(2)
+    raise SystemExit(0 if passed else 2)

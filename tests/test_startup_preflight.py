@@ -1,5 +1,10 @@
 from pathlib import Path
+import contextlib
 import hashlib
+import io
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -338,6 +343,222 @@ class StartupPreflightTests(unittest.TestCase):
             )
             self.assertFalse(report.ok)
             self.assertTrue(any("100.64.1.2" in e for e in report.errors), report.errors)
+
+    def build_remote_fixture(self, tmp: Path, hosts_ip: str = "100.64.1.2"):
+        client_root, private_path, hosts_path, validated_hash, public_pem = self.build_fixture(tmp)
+        private_path.unlink()
+        hosts_path.write_text(
+            "\n".join(f"{hosts_ip} {name}" for name in preflight.REQUIRED_HOSTS) + "\n",
+            encoding="utf-8",
+        )
+        return client_root, hosts_path, validated_hash, hashlib.sha256(public_pem).hexdigest()
+
+    def remote_kwargs(self, client_root, hosts_path, validated_hash, resolved_ip="100.64.1.2"):
+        return dict(
+            client_root=client_root,
+            hosts_path=hosts_path,
+            resolver=lambda _name: resolved_ip,
+            validated_tcls_sha256=validated_hash,
+        )
+
+    def run_remote(self, tmp: Path, hosts_ip: str = "100.64.1.2"):
+        client_root, hosts_path, validated_hash, sha = self.build_remote_fixture(tmp, hosts_ip)
+        status_path = tmp / "preflight_status.json"
+        log_path = tmp / "server.log"
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok = preflight.run_remote_preflight(
+                "100.64.1.2",
+                sha,
+                status_path=status_path,
+                log_path=log_path,
+                **self.remote_kwargs(client_root, hosts_path, validated_hash, hosts_ip),
+            )
+        return ok, status_path, log_path
+
+    def test_remote_preflight_passes_with_matching_apclient_hash_and_no_private_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            client_root, hosts_path, validated_hash, sha = self.build_remote_fixture(Path(td))
+            self.assertFalse((Path(td) / "PRIVATE.PEM").exists())
+            for expected_sha in (sha, sha.upper()):
+                with self.subTest(sha=expected_sha):
+                    report = preflight.evaluate_preflight(
+                        private_key_path=None,
+                        apclient_sha256=expected_sha,
+                        expected_ip="100.64.1.2",
+                        **self.remote_kwargs(client_root, hosts_path, validated_hash),
+                    )
+                    self.assertTrue(report.ok, report.errors)
+                    flags = preflight.preflight_check_flags(report)
+                    self.assertTrue(all(flags.values()), flags)
+                    self.assertFalse(any("PRIVATE.PEM" in e for e in report.errors), report.errors)
+
+    def test_remote_preflight_rejects_wrong_apclient_hash(self):
+        with tempfile.TemporaryDirectory() as td:
+            client_root, hosts_path, validated_hash, _sha = self.build_remote_fixture(Path(td))
+            report = preflight.evaluate_preflight(
+                private_key_path=None,
+                apclient_sha256=hashlib.sha256(b"another host's key").hexdigest(),
+                expected_ip="100.64.1.2",
+                **self.remote_kwargs(client_root, hosts_path, validated_hash),
+            )
+            self.assertFalse(report.ok)
+            flags = preflight.preflight_check_flags(report)
+            self.assertFalse(flags["apclient_exact_bytes"])
+            self.assertFalse(flags["same_rsa_key"])
+            self.assertTrue(any("APClient.dat SHA256" in e for e in report.errors), report.errors)
+            self.assertFalse(any("PRIVATE.PEM" in e for e in report.errors), report.errors)
+
+    def test_remote_preflight_rejects_non_key_apclient_even_when_hash_matches(self):
+        with tempfile.TemporaryDirectory() as td:
+            client_root, hosts_path, validated_hash, _sha = self.build_remote_fixture(Path(td))
+            junk = b"x" * 288
+            (client_root / "TCLS" / "config" / "APClient.dat").write_bytes(junk)
+            report = preflight.evaluate_preflight(
+                private_key_path=None,
+                apclient_sha256=hashlib.sha256(junk).hexdigest(),
+                expected_ip="100.64.1.2",
+                **self.remote_kwargs(client_root, hosts_path, validated_hash),
+            )
+            self.assertFalse(report.ok)
+            flags = preflight.preflight_check_flags(report)
+            self.assertFalse(flags["apclient_272_bytes"])
+            self.assertFalse(flags["rsa_1024"])
+
+    def test_run_remote_preflight_writes_remote_status_and_returns_true(self):
+        with tempfile.TemporaryDirectory() as td:
+            ok, status_path, _log_path = self.run_remote(Path(td))
+            self.assertIs(ok, True)
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status["mode"], "remote")
+            self.assertEqual(status["remote_host"], "100.64.1.2")
+            self.assertIsNone(status["server_pid"])
+            self.assertIs(status["listeners_ready"], False)
+            self.assertIs(status["launch_ready"], True)
+            self.assertIs(status["checks"]["hosts"], True)
+
+    def test_run_remote_preflight_fails_when_hosts_point_at_loopback(self):
+        with tempfile.TemporaryDirectory() as td:
+            ok, status_path, _log_path = self.run_remote(Path(td), hosts_ip="127.0.0.1")
+            self.assertIs(ok, False)
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status["mode"], "remote")
+            self.assertIs(status["checks"]["hosts"], False)
+            self.assertIs(status["launch_ready"], False)
+
+    def test_remote_cli_rejects_invalid_remote_host_without_writing_anything(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            env = os.environ.copy()
+            for name in ("AF_PUBLIC_HOST", "AF_DS_PUBLIC_HOST"):
+                env.pop(name, None)
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            env["AF_ACCOUNT_DB"] = str(tmp / "accounts.sqlite3")
+            env["AF_LOG_PATH"] = str(tmp / "server.log")
+            env["AF_PREFLIGHT_STATUS_PATH"] = str(tmp / "preflight_status.json")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "server/assaultfire_preflight.py",
+                    "--remote-host",
+                    "127.1",
+                    "--apclient-sha256",
+                    hashlib.sha256(b"apclient").hexdigest(),
+                ],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 2, output)
+            self.assertIn("--remote-host", output)
+            self.assertIn("'127.1'", output)
+            self.assertFalse((tmp / "preflight_status.json").exists())
+            self.assertFalse((tmp / "server.log").exists())
+
+    def test_remote_report_lines_use_remote_pass_wording_without_listeners(self):
+        with tempfile.TemporaryDirectory() as td:
+            client_root, hosts_path, validated_hash, sha = self.build_remote_fixture(Path(td))
+            report = preflight.evaluate_preflight(
+                private_key_path=None,
+                apclient_sha256=sha,
+                expected_ip="100.64.1.2",
+                **self.remote_kwargs(client_root, hosts_path, validated_hash),
+            )
+            self.assertTrue(report.ok, report.errors)
+            lines = preflight.preflight_report_lines(report, listeners_ready=True, remote=True)
+            self.assertIn(
+                "[PREFLIGHT] PASS - remote client checks succeeded; "
+                "supported game launch helpers are UNLOCKED.",
+                lines,
+            )
+            self.assertFalse(any("FAILED" in line for line in lines), lines)
+            self.assertNotIn("listeners", "\n".join(lines))
+
+    def test_remote_report_lines_use_remote_failure_wording_without_listeners(self):
+        with tempfile.TemporaryDirectory() as td:
+            client_root, hosts_path, validated_hash, sha = self.build_remote_fixture(
+                Path(td), hosts_ip="127.0.0.1"
+            )
+            report = preflight.evaluate_preflight(
+                private_key_path=None,
+                apclient_sha256=sha,
+                expected_ip="100.64.1.2",
+                **self.remote_kwargs(client_root, hosts_path, validated_hash, "127.0.0.1"),
+            )
+            self.assertFalse(report.ok)
+            lines = preflight.preflight_report_lines(report, listeners_ready=True, remote=True)
+            self.assertIn(
+                "[PREFLIGHT] FAILED - remote client checks failed; "
+                "supported game launch helpers remain LOCKED.",
+                lines,
+            )
+            self.assertFalse(any("PASS" in line for line in lines), lines)
+            self.assertNotIn("listeners", "\n".join(lines))
+
+    def test_run_remote_preflight_log_has_remote_wording_without_listeners(self):
+        with tempfile.TemporaryDirectory() as td:
+            ok, _status_path, log_path = self.run_remote(Path(td))
+            self.assertIs(ok, True)
+            logged = log_path.read_text(encoding="utf-8")
+            self.assertIn("[PREFLIGHT] PASS - remote client checks succeeded", logged)
+            self.assertNotIn("listeners", logged)
+
+    def test_report_lines_without_remote_keep_local_wording(self):
+        with tempfile.TemporaryDirectory() as td:
+            client_root, private_path, hosts_path, validated_hash, _ = self.build_fixture(Path(td))
+            good = preflight.evaluate_preflight(
+                private_key_path=private_path,
+                client_root=client_root,
+                hosts_path=hosts_path,
+                resolver=lambda _name: "127.0.0.1",
+                validated_tcls_sha256=validated_hash,
+            )
+            self.assertTrue(good.ok, good.errors)
+            self.assertEqual(
+                preflight.preflight_report_lines(good)[-1],
+                "[PREFLIGHT] PASS - client checks succeeded; launch gate remains "
+                "LOCKED until all required server listeners bind successfully.",
+            )
+            self.assertEqual(
+                preflight.preflight_report_lines(good, listeners_ready=True)[-1],
+                "[PREFLIGHT] PASS - all required checks and listeners succeeded; "
+                "supported game launch helpers are UNLOCKED.",
+            )
+            bad = preflight.evaluate_preflight(
+                private_key_path=private_path,
+                client_root=client_root,
+                hosts_path=hosts_path,
+                resolver=lambda _name: "10.0.0.5",
+                validated_tcls_sha256=validated_hash,
+            )
+            self.assertFalse(bad.ok)
+            self.assertIn(
+                "[PREFLIGHT] FAILED - server listeners will NOT start; "
+                "supported game launch helpers remain LOCKED.",
+                preflight.preflight_report_lines(bad),
+            )
 
 
 if __name__ == "__main__":
