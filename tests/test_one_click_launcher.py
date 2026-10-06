@@ -489,6 +489,45 @@ class OneClickLauncherTests(unittest.TestCase):
             re.search(r'\$expectedIp\s*=\s*"127\.0\.0\.1"', s[assignment.end():s.index(call)])
         )
 
+    def test_launcher_reads_public_host_env_in_main_try_before_hosts_mapping(self):
+        s = self.text(SCRIPT)
+        call = s.index("Ensure-Hosts $repoRoot $expectedIp")
+        main = re.search(r"\ntry\{\s*\$expectedIp", s)
+        self.assertIsNotNone(main)
+        for pin in ("$env:AF_PUBLIC_HOST", "AF_PUBLIC_HOST must be an IPv4 address"):
+            self.assertIn(pin, s)
+            at = s.find(pin, main.start())
+            self.assertNotEqual(at, -1, pin)
+            self.assertLess(at, call)
+        self.assertRegex(s, r"\$env:AF_PUBLIC_HOST\)?\.Trim\(\)")
+
+    def test_launcher_validates_public_host_env_and_names_source_and_value(self):
+        s = self.text(SCRIPT)
+        msg = "AF_PUBLIC_HOST must be an IPv4 address"
+        self.assertIn(msg, s)
+        self.assertRegex(s, re.escape(msg) + r"[^\n]*got '\$")
+        at = s.index(msg)
+        window = s[max(0, at - 400):at]
+        self.assertIn("$env:AF_PUBLIC_HOST", window)
+        self.assertRegex(window, r"-(?:not)?match\s*\$IPV4_PATTERN")
+
+    def test_remote_host_wins_over_public_host_env(self):
+        s = self.text(SCRIPT)
+        self.assertIn("$env:AF_PUBLIC_HOST", s)
+        main = re.search(r"\ntry\{\s*\$expectedIp", s)
+        remote = re.search(r"\$expectedIp\s*=\s*\$RemoteHost", s)
+        self.assertIsNotNone(main)
+        self.assertIsNotNone(remote)
+        env_at = s.index("$env:AF_PUBLIC_HOST", main.start())
+        if env_at > remote.end():
+            self.assertRegex(s[remote.end():env_at], r"\belse|-not\s*\$RemoteHost|!\s*\$RemoteHost")
+
+    def test_launcher_keeps_loopback_default_without_remote_host_or_public_host(self):
+        s = self.text(SCRIPT)
+        main = re.search(r"\ntry\{\s*\$expectedIp", s)
+        self.assertIsNotNone(main)
+        self.assertIn('$expectedIp="127.0.0.1"', s[main.start():s.index("Ensure-Hosts $repoRoot $expectedIp")])
+
     def test_launcher_skips_key_generation_in_remote_mode(self):
         s = self.text(SCRIPT)
         guard = 'if(-not $RemoteHost){Write-Step "Preparing the local RSA/APClient pair"; Ensure-Keys $repoRoot $gameRoot $venvPython}'

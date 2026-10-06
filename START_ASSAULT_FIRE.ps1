@@ -782,6 +782,7 @@ $consoleHelper=Join-Path $PSScriptRoot "tools\setup\af_console_nonblocking.ps1";
 try{
     $expectedIp="127.0.0.1"
     if($RemoteHost){if($RemoteHost -notmatch $IPV4_PATTERN){throw "-RemoteHost must be an IPv4 address like 100.64.1.2; got '$RemoteHost'"}; if($ApClientSha256 -notmatch '^[0-9A-Fa-f]{64}$'){throw "-ApClientSha256 is required with -RemoteHost: pass the 64-hex SHA-256 of the host's TCLS\config\APClient.dat."}; $expectedIp=$RemoteHost}
+    if(-not $RemoteHost -and -not [string]::IsNullOrWhiteSpace($env:AF_PUBLIC_HOST)){$publicHost=$env:AF_PUBLIC_HOST.Trim(); if($publicHost -notmatch $IPV4_PATTERN){throw "AF_PUBLIC_HOST must be an IPv4 address; got '$publicHost'"}; $expectedIp=$publicHost}
     $repoRoot=Split-Path -Parent $self; if(-not(Test-Path -LiteralPath (Join-Path $repoRoot "server\assaultfire_server_v143b.py") -PathType Leaf)){throw "START_ASSAULT_FIRE.ps1 must stay in the root of the af-emulator folder."}
     $gameRoot=Find-GameRoot $repoRoot; if(-not $gameRoot){throw("Could not find the Assault Fire PH game root. Put the ENTIRE af-emulator folder inside your "+"Assault Fire game folder, or copy the emulator contents directly into the game root. "+"The game root must contain TCLS\client.exe, TCLS\Tenio\TCLS.dll, and Binaries\Win32\TGame.exe.")}
     $win32=Join-Path $gameRoot "Binaries\Win32"; $clientExe=Join-Path $gameRoot "TCLS\client.exe"; Write-Host "[OK] Emulator : $repoRoot" -ForegroundColor Green; Write-Host "[OK] Game root: $gameRoot" -ForegroundColor Green
