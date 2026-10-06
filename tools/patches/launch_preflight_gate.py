@@ -142,6 +142,7 @@ def validate_status(
     listening_ports: Callable[[int], set[int]] = default_listening_ports,
 ) -> list[str]:
     errors: list[str] = []
+    remote = data.get("mode") == "remote"
 
     if data.get("schema") != PREFLIGHT_STATUS_SCHEMA:
         errors.append(
@@ -162,29 +163,30 @@ def validate_status(
         errors.append("server preflight result is FAILED")
     if data.get("log_written") is not True:
         errors.append("server preflight report was not persisted to the server log")
-    if data.get("listeners_ready") is not True:
+    if not remote and data.get("listeners_ready") is not True:
         errors.append("server listener startup is not complete")
     if data.get("launch_ready") is not True:
         errors.append("game launch gate is LOCKED")
 
-    server_pid = data.get("server_pid")
-    try:
-        server_pid = int(server_pid)
-    except (TypeError, ValueError):
-        server_pid = 0
-    server_alive = bool(server_pid and pid_alive(server_pid))
-    if not server_alive:
-        errors.append(
-            f"server process from preflight is not running (PID={server_pid or 'missing'})"
-        )
-    elif os.name == "nt":
-        owned_ports = set(listening_ports(server_pid))
-        missing_ports = [port for port in REQUIRED_TCP_PORTS if port not in owned_ports]
-        if missing_ports:
+    if not remote:
+        server_pid = data.get("server_pid")
+        try:
+            server_pid = int(server_pid)
+        except (TypeError, ValueError):
+            server_pid = 0
+        server_alive = bool(server_pid and pid_alive(server_pid))
+        if not server_alive:
             errors.append(
-                "server core listeners are not ready under the preflight PID; "
-                "missing TCP port(s): " + ", ".join(str(p) for p in missing_ports)
+                f"server process from preflight is not running (PID={server_pid or 'missing'})"
             )
+        elif os.name == "nt":
+            owned_ports = set(listening_ports(server_pid))
+            missing_ports = [port for port in REQUIRED_TCP_PORTS if port not in owned_ports]
+            if missing_ports:
+                errors.append(
+                    "server core listeners are not ready under the preflight PID; "
+                    "missing TCP port(s): " + ", ".join(str(p) for p in missing_ports)
+                )
 
     if not data.get("client_root"):
         errors.append("preflight client root is missing")
@@ -217,8 +219,12 @@ def require_launch_ready(
             "GAME LAUNCH BLOCKED: server preflight has not passed.\n"
             f"Status: {target}\n"
             f"{detail}\n"
-            "Start/restart the server and do not continue until every "
-            "required [PREFLIGHT] check passes and 'game launch gate : UNLOCKED'."
+            + (
+                "Re-run START_ASSAULT_FIRE.ps1 -RemoteHost <host> -ApClientSha256 <hash> and do not continue until every "
+                if data.get("mode") == "remote"
+                else "Start/restart the server and do not continue until every "
+            )
+            + "required [PREFLIGHT] check passes and 'game launch gate : UNLOCKED'."
         )
     return data
 

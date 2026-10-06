@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PATCH_DIR = ROOT / "tools" / "patches"
@@ -31,6 +32,35 @@ class LaunchPreflightGateTests(unittest.TestCase):
         path = root / "preflight_status.json"
         path.write_text(json.dumps(data), encoding="utf-8")
         return path
+
+    def remote_status(self):
+        data = self.good_status()
+        data.update(
+            mode="remote",
+            remote_host="100.64.1.2",
+            server_pid=None,
+            listeners_ready=False,
+        )
+        return data
+
+    def remote_errors(self, data):
+        with mock.patch.object(gate.os, "name", "nt"):
+            return gate.validate_status(
+                data,
+                pid_alive=lambda _pid: False,
+                listening_ports=lambda _pid: set(),
+            )
+
+    def blocked_message(self, data):
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_status(Path(td), data)
+            with self.assertRaises(gate.LaunchGateError) as ctx:
+                gate.require_launch_ready(
+                    path,
+                    pid_alive=lambda _pid: False,
+                    listening_ports=lambda _pid: set(),
+                )
+        return str(ctx.exception)
 
     def test_pass_requires_all_checks_and_live_server(self):
         with tempfile.TemporaryDirectory() as td:
@@ -120,6 +150,63 @@ class LaunchPreflightGateTests(unittest.TestCase):
                     listening_ports=lambda _pid: set(gate.REQUIRED_TCP_PORTS),
                 )
             self.assertIn("game launch gate is LOCKED", str(ctx.exception))
+
+    def test_remote_status_passes_without_local_server(self):
+        self.assertEqual(self.remote_errors(self.remote_status()), [])
+
+    def test_remote_status_with_failed_hosts_is_blocked(self):
+        data = self.remote_status()
+        data["checks"]["hosts"] = False
+        errors = self.remote_errors(data)
+        self.assertTrue(any("hosts" in item for item in errors), errors)
+        self.assertFalse(
+            any("server process" in item or "listener" in item for item in errors),
+            errors,
+        )
+
+    def test_remote_status_with_failed_apclient_hash_is_blocked(self):
+        data = self.remote_status()
+        data["checks"]["apclient_exact_bytes"] = False
+        errors = self.remote_errors(data)
+        self.assertTrue(any("apclient_exact_bytes" in item for item in errors), errors)
+        self.assertFalse(
+            any("server process" in item or "listener" in item for item in errors),
+            errors,
+        )
+
+    def test_remote_status_with_launch_ready_false_is_blocked(self):
+        data = self.remote_status()
+        data["launch_ready"] = False
+        errors = self.remote_errors(data)
+        self.assertTrue(any("game launch gate is LOCKED" in item for item in errors), errors)
+        self.assertFalse(
+            any("server process" in item or "listener" in item for item in errors),
+            errors,
+        )
+
+    def test_unknown_mode_still_requires_local_server(self):
+        data = self.remote_status()
+        data["mode"] = "something-else"
+        errors = self.remote_errors(data)
+        self.assertTrue(
+            any("server process from preflight is not running" in item for item in errors),
+            errors,
+        )
+
+    def test_blocked_remote_status_tells_friend_to_rerun_launcher(self):
+        data = self.remote_status()
+        data["checks"]["hosts"] = False
+        message = self.blocked_message(data)
+        self.assertIn("GAME LAUNCH BLOCKED", message)
+        self.assertIn("Re-run START_ASSAULT_FIRE.ps1 -RemoteHost", message)
+        self.assertNotIn("Start/restart the server", message)
+
+    def test_blocked_local_status_keeps_start_server_message(self):
+        data = self.good_status()
+        data["checks"]["hosts"] = False
+        message = self.blocked_message(data)
+        self.assertIn("Start/restart the server", message)
+        self.assertNotIn("Re-run START_ASSAULT_FIRE.ps1 -RemoteHost", message)
 
     def test_tgame_must_belong_to_preflight_client(self):
         data = self.good_status()
