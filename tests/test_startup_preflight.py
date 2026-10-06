@@ -295,6 +295,50 @@ class StartupPreflightTests(unittest.TestCase):
                 self.assertIn("AF_PUBLIC_HOST", str(ctx.exception))
                 self.assertIn(repr(value), str(ctx.exception))
 
+    def test_expected_ip_accepts_hosts_and_resolver_at_that_address(self):
+        with tempfile.TemporaryDirectory() as td:
+            data = self.build_fixture(Path(td))
+            client_root, private_path, hosts_path, validated_hash, _ = data
+            hosts_path.write_text(
+                "\n".join(
+                    f"100.64.1.2 {name}" for name in preflight.REQUIRED_HOSTS
+                ) + "\n",
+                encoding="utf-8",
+            )
+            report = preflight.evaluate_preflight(
+                private_key_path=private_path,
+                client_root=client_root,
+                hosts_path=hosts_path,
+                resolver=lambda _name: "100.64.1.2",
+                validated_tcls_sha256=validated_hash,
+                expected_ip="100.64.1.2",
+            )
+            self.assertTrue(report.ok, report.errors)
+            self.assertTrue(preflight.preflight_check_flags(report)["hosts"])
+            host_lines = [
+                line
+                for line in preflight.preflight_report_lines(report)
+                if "[PREFLIGHT] hosts " in line and ".levelupgames.ph" in line
+            ]
+            self.assertEqual(len(host_lines), len(preflight.REQUIRED_HOSTS))
+            for line in host_lines:
+                self.assertIn(": YES (", line)
+
+    def test_expected_ip_rejects_loopback_hosts_and_names_expected_address(self):
+        with tempfile.TemporaryDirectory() as td:
+            data = self.build_fixture(Path(td))
+            client_root, private_path, hosts_path, validated_hash, _ = data
+            report = preflight.evaluate_preflight(
+                private_key_path=private_path,
+                client_root=client_root,
+                hosts_path=hosts_path,
+                resolver=lambda _name: "127.0.0.1",
+                validated_tcls_sha256=validated_hash,
+                expected_ip="100.64.1.2",
+            )
+            self.assertFalse(report.ok)
+            self.assertTrue(any("100.64.1.2" in e for e in report.errors), report.errors)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,6 +75,7 @@ class PreflightReport:
     host_file_path: Path | None = None
     host_file_values: dict[str, list[str]] = field(default_factory=dict)
     host_resolved_values: dict[str, str | None] = field(default_factory=dict)
+    expected_ip: str = LOOPBACK_IPV4
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -199,8 +200,12 @@ def evaluate_preflight(
     env: Mapping[str, str] | None = None,
     resolver: Callable[[str], str] = socket.gethostbyname,
     validated_tcls_sha256: str = VALIDATED_TCLS_SHA256,
+    expected_ip: str | None = None,
 ) -> PreflightReport:
-    report = PreflightReport(private_key_path=Path(private_key_path).expanduser().resolve())
+    report = PreflightReport(
+        private_key_path=Path(private_key_path).expanduser().resolve(),
+        expected_ip=expected_ip or LOOPBACK_IPV4,
+    )
 
     try:
         report.client_root = (
@@ -280,14 +285,14 @@ def evaluate_preflight(
 
     for name in REQUIRED_HOSTS:
         values = report.host_file_values.get(name, [])
-        if values != [LOOPBACK_IPV4]:
+        if values != [report.expected_ip]:
             if not values:
                 report.errors.append(
-                    f"hosts entry missing: {LOOPBACK_IPV4} {name}"
+                    f"hosts entry missing: {report.expected_ip} {name}"
                 )
             else:
                 report.errors.append(
-                    f"hosts entry for {name} must be exactly {LOOPBACK_IPV4}; found {values}"
+                    f"hosts entry for {name} must be exactly {report.expected_ip}; found {values}"
                 )
 
         try:
@@ -295,9 +300,9 @@ def evaluate_preflight(
         except Exception:
             resolved = None
         report.host_resolved_values[name] = resolved
-        if resolved != LOOPBACK_IPV4:
+        if resolved != report.expected_ip:
             report.errors.append(
-                f"{name} resolves to {resolved!r}, expected {LOOPBACK_IPV4}"
+                f"{name} resolves to {resolved!r}, expected {report.expected_ip}"
             )
 
     return report
@@ -306,8 +311,8 @@ def evaluate_preflight(
 def preflight_check_flags(report: PreflightReport) -> dict[str, bool]:
     check = report.key_check
     host_ok = all(
-        report.host_file_values.get(name, []) == [LOOPBACK_IPV4]
-        and report.host_resolved_values.get(name) == LOOPBACK_IPV4
+        report.host_file_values.get(name, []) == [report.expected_ip]
+        and report.host_resolved_values.get(name) == report.expected_ip
         for name in REQUIRED_HOSTS
     )
     return {
@@ -478,7 +483,7 @@ def preflight_report_lines(
     for name in REQUIRED_HOSTS:
         file_values = report.host_file_values.get(name, [])
         resolved = report.host_resolved_values.get(name)
-        passed = file_values == [LOOPBACK_IPV4] and resolved == LOOPBACK_IPV4
+        passed = file_values == [report.expected_ip] and resolved == report.expected_ip
         lines.append(
             f"[PREFLIGHT] hosts {name:<27}: "
             f"{'YES' if passed else 'NO'} "
