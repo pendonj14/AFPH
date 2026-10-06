@@ -698,6 +698,8 @@ If this machine is only hosting the emulator/backend, start it with:
 
 You can also set `AF_SERVER_ONLY=1`.
 
+Playing with friends over Tailscale? Read [Remote Play over Tailscale](docs/REMOTE_PLAY_TAILSCALE.md).
+
 Server-only mode skips the **local** client/TCLS/`APClient.dat`/hosts preflight, so
 `AF_CLIENT_ROOT` and `AF_GAME_DIR` are not required on the host. It does **not**
 unlock the local game-launch helpers.

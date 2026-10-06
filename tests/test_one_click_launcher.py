@@ -590,6 +590,35 @@ class OneClickLauncherTests(unittest.TestCase):
             self.assertIn("}else{" + local, line)
         self.assertIn("ask the host to create your account", tail)
 
+    def test_remote_play_guide_exists_and_is_linked_from_readme(self):
+        guide = ROOT / "docs" / "REMOTE_PLAY_TAILSCALE.md"
+        self.assertTrue(guide.is_file(), "docs/REMOTE_PLAY_TAILSCALE.md is missing")
+        s = self.text(guide)
+        for phrase in (
+            "tailscale ip -4",
+            "AF_PUBLIC_HOST",
+            "-RemoteHost",
+            "-ApClientSha256",
+            "Get-FileHash",
+            "APClient.dat",
+            "Never copy PRIVATE.PEM",
+            "100.64.0.0/10",
+            "9060",
+            "8000",
+            "9010",
+            "65005",
+            "65006",
+            "65008-65011",
+            "New-NetFirewallRule",
+            "never port-forward",
+            "python.exe",
+            "7777",
+            "subnet router",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, s)
+        self.assertIn("docs/REMOTE_PLAY_TAILSCALE.md", self.text(README))
+
 
 if __name__ == "__main__":
     unittest.main()
