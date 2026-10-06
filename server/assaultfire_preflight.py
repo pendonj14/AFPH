@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import socket
@@ -25,6 +26,16 @@ REQUIRED_HOSTS = (
 LOOPBACK_IPV4 = "127.0.0.1"
 
 PREFLIGHT_STATUS_SCHEMA = 2
+
+
+def parse_ipv4_setting(name: str, value: str | None) -> str:
+    text = (value or "").strip()
+    if not text:
+        return LOOPBACK_IPV4
+    try:
+        return str(ipaddress.IPv4Address(text))
+    except ValueError:
+        raise ValueError(f"{name} must be an IPv4 address like 100.64.1.2; got {value!r}") from None
 
 
 def default_preflight_status_path() -> Path:

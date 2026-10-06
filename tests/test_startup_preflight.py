@@ -271,6 +271,30 @@ class StartupPreflightTests(unittest.TestCase):
         self.assertLess(prebind, unlock)
         self.assertLess(unlock, listener)
 
+    def test_parse_ipv4_setting_defaults_to_loopback_when_unset_or_blank(self):
+        for value in (None, "", "  "):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    preflight.parse_ipv4_setting("AF_PUBLIC_HOST", value),
+                    "127.0.0.1",
+                )
+
+    def test_parse_ipv4_setting_returns_stripped_valid_address(self):
+        for value in ("100.64.1.2", " 100.64.1.2 "):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    preflight.parse_ipv4_setting("AF_PUBLIC_HOST", value),
+                    "100.64.1.2",
+                )
+
+    def test_parse_ipv4_setting_rejects_non_ipv4_naming_setting_and_value(self):
+        for value in ("not-an-ip", "127.1", "01.2.3.4", "::1", "tdir.levelupgames.ph"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as ctx:
+                    preflight.parse_ipv4_setting("AF_PUBLIC_HOST", value)
+                self.assertIn("AF_PUBLIC_HOST", str(ctx.exception))
+                self.assertIn(repr(value), str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
