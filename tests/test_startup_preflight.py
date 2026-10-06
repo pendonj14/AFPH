@@ -26,7 +26,7 @@ class StartupPreflightTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         os.environ.pop("AF_PUBLIC_HOST", None)
 
-    def build_fixture(self, tmp: Path):
+    def build_fixture(self, tmp: Path, hosts_ip="127.0.0.1"):
         client_root = tmp / "AF"
         tcls_dir = client_root / "TCLS" / "Tenio"
         config_dir = client_root / "TCLS" / "config"
@@ -56,7 +56,7 @@ class StartupPreflightTests(unittest.TestCase):
         hosts_path = tmp / "hosts"
         hosts_path.write_text(
             "\n".join(
-                f"127.0.0.1 {name}" for name in preflight.REQUIRED_HOSTS
+                f"{hosts_ip} {name}" for name in preflight.REQUIRED_HOSTS
             ) + "\n",
             encoding="utf-8",
         )
@@ -565,11 +565,7 @@ class StartupPreflightTests(unittest.TestCase):
 
     def evaluate_with_env(self, env, hosts_ip="127.0.0.1", resolved_ip="127.0.0.1"):
         with tempfile.TemporaryDirectory() as td:
-            client_root, private_path, hosts_path, validated_hash, _ = self.build_fixture(Path(td))
-            hosts_path.write_text(
-                "\n".join(f"{hosts_ip} {name}" for name in preflight.REQUIRED_HOSTS) + "\n",
-                encoding="utf-8",
-            )
+            client_root, private_path, hosts_path, validated_hash, _ = self.build_fixture(Path(td), hosts_ip)
             return preflight.evaluate_preflight(
                 private_key_path=private_path,
                 client_root=client_root,
