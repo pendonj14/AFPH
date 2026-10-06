@@ -20,6 +20,12 @@ import assaultfire_preflight as preflight
 
 
 class StartupPreflightTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("AF_PUBLIC_HOST", None)
+
     def build_fixture(self, tmp: Path):
         client_root = tmp / "AF"
         tcls_dir = client_root / "TCLS" / "Tenio"
@@ -556,6 +562,44 @@ class StartupPreflightTests(unittest.TestCase):
                 "supported game launch helpers remain LOCKED.",
                 preflight.preflight_report_lines(bad),
             )
+
+    def evaluate_with_env(self, env, hosts_ip="127.0.0.1", resolved_ip="127.0.0.1"):
+        with tempfile.TemporaryDirectory() as td:
+            client_root, private_path, hosts_path, validated_hash, _ = self.build_fixture(Path(td))
+            hosts_path.write_text(
+                "\n".join(f"{hosts_ip} {name}" for name in preflight.REQUIRED_HOSTS) + "\n",
+                encoding="utf-8",
+            )
+            return preflight.evaluate_preflight(
+                private_key_path=private_path,
+                client_root=client_root,
+                hosts_path=hosts_path,
+                resolver=lambda _name: resolved_ip,
+                validated_tcls_sha256=validated_hash,
+                env=env,
+            )
+
+    def test_public_host_env_sets_expected_ip_when_hosts_and_resolver_match(self):
+        report = self.evaluate_with_env(
+            {"AF_PUBLIC_HOST": "100.64.1.2"}, hosts_ip="100.64.1.2", resolved_ip="100.64.1.2"
+        )
+        self.assertTrue(report.ok, report.errors)
+        self.assertEqual(report.expected_ip, "100.64.1.2")
+
+    def test_public_host_env_rejects_loopback_hosts_and_names_public_host(self):
+        report = self.evaluate_with_env({"AF_PUBLIC_HOST": "100.64.1.2"})
+        self.assertFalse(report.ok)
+        self.assertTrue(any("100.64.1.2" in e for e in report.errors), report.errors)
+
+    def test_empty_env_keeps_loopback_expected_ip(self):
+        report = self.evaluate_with_env({})
+        self.assertTrue(report.ok, report.errors)
+        self.assertEqual(report.expected_ip, "127.0.0.1")
+
+    def test_invalid_public_host_env_raises_value_error_naming_setting(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.evaluate_with_env({"AF_PUBLIC_HOST": "bad"})
+        self.assertIn("AF_PUBLIC_HOST", str(ctx.exception))
 
 
 if __name__ == "__main__":

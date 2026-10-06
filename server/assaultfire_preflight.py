@@ -229,7 +229,9 @@ def evaluate_preflight(
             if private_key_path is not None
             else None
         ),
-        expected_ip=expected_ip or LOOPBACK_IPV4,
+        expected_ip=expected_ip or parse_ipv4_setting(
+            "AF_PUBLIC_HOST", (os.environ if env is None else env).get("AF_PUBLIC_HOST")
+        ),
     )
 
     try:
