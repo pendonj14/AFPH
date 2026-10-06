@@ -857,12 +857,12 @@ try{
     Write-Host "[OK] TCLS is armed. You can click START now." -ForegroundColor Green
 
     Write-Title "YOU ARE DONE WITH SETUP"
-    Write-Host "The emulator server is running."
+    if($RemoteHost){Write-Host "No local server runs on this PC. The game connects to the host at $RemoteHost."}else{Write-Host "The emulator server is running."}
     Write-Host "The launch helper is armed and waiting for the game launch."
     Write-Host "The Assault Fire launcher was opened automatically."
     Write-Host ""
     Write-Host "What you do now:" -ForegroundColor Green
-    Write-Host "  1. First time only: register on the local account page opened in your browser."
+    if($RemoteHost){Write-Host "  1. First time only: ask the host to create your account on their register page."}else{Write-Host "  1. First time only: register on the local account page opened in your browser."}
     Write-Host "  2. Log in in the Assault Fire launcher with that same username and password."
     Write-Host "  3. When the START button appears, click START."
     Write-Host ""

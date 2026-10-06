@@ -159,30 +159,21 @@ class LaunchPreflightGateTests(unittest.TestCase):
         data["checks"]["hosts"] = False
         errors = self.remote_errors(data)
         self.assertTrue(any("hosts" in item for item in errors), errors)
-        self.assertFalse(
-            any("server process" in item or "listener" in item for item in errors),
-            errors,
-        )
+        self.assertNotRegex("\n".join(errors), r"server process|listener")
 
     def test_remote_status_with_failed_apclient_hash_is_blocked(self):
         data = self.remote_status()
         data["checks"]["apclient_exact_bytes"] = False
         errors = self.remote_errors(data)
         self.assertTrue(any("apclient_exact_bytes" in item for item in errors), errors)
-        self.assertFalse(
-            any("server process" in item or "listener" in item for item in errors),
-            errors,
-        )
+        self.assertNotRegex("\n".join(errors), r"server process|listener")
 
     def test_remote_status_with_launch_ready_false_is_blocked(self):
         data = self.remote_status()
         data["launch_ready"] = False
         errors = self.remote_errors(data)
         self.assertTrue(any("game launch gate is LOCKED" in item for item in errors), errors)
-        self.assertFalse(
-            any("server process" in item or "listener" in item for item in errors),
-            errors,
-        )
+        self.assertNotRegex("\n".join(errors), r"server process|listener")
 
     def test_unknown_mode_still_requires_local_server(self):
         data = self.remote_status()

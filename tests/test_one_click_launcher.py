@@ -428,11 +428,6 @@ class OneClickLauncherTests(unittest.TestCase):
         self.assertIsNotNone(assignment)
         self.assertLess(assignment.start(), s.index(call))
 
-    def remote_branch(self, s):
-        self.assertIn("if($RemoteHost){", s)
-        start = s.index('Write-Step "Starting the emulator server"')
-        return s[s.rindex("if($RemoteHost){", 0, start):start]
-
     def test_launcher_declares_remote_mode_parameters(self):
         s = self.text(SCRIPT)
         block = s[s.index("param("):s.index("function Test-IsAdministrator")]
@@ -517,7 +512,8 @@ class OneClickLauncherTests(unittest.TestCase):
 
     def test_remote_branch_runs_preflight_cli_without_starting_a_server(self):
         s = self.text(SCRIPT)
-        remote = self.remote_branch(s)
+        start = s.index('Write-Step "Starting the emulator server"')
+        remote = s[s.rindex("if($RemoteHost){", 0, start):start]
         cli = '"--remote-host",$RemoteHost,"--apclient-sha256",$ApClientSha256'
         self.assertIn(cli, s)
         self.assertIn(cli, remote)
@@ -550,6 +546,20 @@ class OneClickLauncherTests(unittest.TestCase):
             "[ACCOUNT] Use the same username and password in the Assault Fire launcher. Register only once for this server database.",
         ):
             self.assertIn(line, local)
+
+    def test_done_banner_hides_local_server_and_account_hints_in_remote_mode(self):
+        s = self.text(SCRIPT)
+        tail = s[s.index('Write-Title "YOU ARE DONE WITH SETUP"'):]
+        for local in (
+            'Write-Host "The emulator server is running."',
+            'Write-Host "  1. First time only: register on the local account page opened in your browser."',
+        ):
+            self.assertIn(local, tail)
+            at = tail.index(local)
+            line = tail[tail.rindex("\n", 0, at) + 1:tail.index("\n", at)]
+            self.assertTrue(line.lstrip().startswith("if($RemoteHost){"), line)
+            self.assertIn("}else{" + local, line)
+        self.assertIn("ask the host to create your account", tail)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,5 @@
 from pathlib import Path
-import contextlib
 import hashlib
-import io
 import json
 import os
 import subprocess
@@ -365,14 +363,13 @@ class StartupPreflightTests(unittest.TestCase):
         client_root, hosts_path, validated_hash, sha = self.build_remote_fixture(tmp, hosts_ip)
         status_path = tmp / "preflight_status.json"
         log_path = tmp / "server.log"
-        with contextlib.redirect_stdout(io.StringIO()):
-            ok = preflight.run_remote_preflight(
-                "100.64.1.2",
-                sha,
-                status_path=status_path,
-                log_path=log_path,
-                **self.remote_kwargs(client_root, hosts_path, validated_hash, hosts_ip),
-            )
+        ok = preflight.run_remote_preflight(
+            "100.64.1.2",
+            sha,
+            status_path=status_path,
+            log_path=log_path,
+            **self.remote_kwargs(client_root, hosts_path, validated_hash, hosts_ip),
+        )
         return ok, status_path, log_path
 
     def test_remote_preflight_passes_with_matching_apclient_hash_and_no_private_key(self):
