@@ -617,6 +617,10 @@ class OneClickLauncherTests(unittest.TestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, s)
+        rules = [line for line in s.splitlines() if line.startswith("New-NetFirewallRule")]
+        self.assertEqual(len(rules), 2)
+        for line in rules:
+            self.assertIn("-RemoteAddress 100.64.0.0/10", line)
         self.assertIn("docs/REMOTE_PLAY_TAILSCALE.md", self.text(README))
 
 

@@ -1,6 +1,6 @@
 # Remote Play over Tailscale
 
-This guide lets friends on other PCs play on your emulator over Tailscale. One PC, the host, runs the server. Each friend runs the one-click launcher in remote mode and connects to the host inside the tailnet. Every PC needs a full PH v1.0.0.24 client with the emulator folder inside its game root, the same layout the one-click launcher always needs.
+This guide lets friends on other PCs play on your emulator over Tailscale. One PC, the host, runs the server. Each friend runs the one-click launcher in remote mode and connects to the host inside the tailnet. Every PC, the host included, needs a full PH v1.0.0.24 client with the emulator folder inside its game root: matches run on the host's own game binary.
 
 Not yet confirmed on a real two-PC run: the lobby and matches over Tailscale, and a host playing on its own server PC. Record what you see.
 
@@ -50,8 +50,6 @@ Do not open any other port:
 
 Tailscale already connects the PCs, so never port-forward these ports on your router.
 
-The first time the server runs, Windows may ask to allow `python.exe` and then create an inbound rule for it on every port and every address. Open Windows Defender Firewall with Advanced Security, find the inbound rules for `python.exe`, and delete them or set their remote address to `100.64.0.0/10`.
-
 ## 4. Start the server on the host
 
 Open PowerShell as Administrator in the emulator folder. Set `AF_PUBLIC_HOST` in that same window: a value set in a normal window does not reach the elevated launcher. Set `AF_ACCOUNT_DB` to a path outside the emulator folder, so account data never ends up in a copy or commit of that folder.
@@ -59,17 +57,29 @@ Open PowerShell as Administrator in the emulator folder. Set `AF_PUBLIC_HOST` in
 ```powershell
 $env:AF_PUBLIC_HOST="100.64.1.2"
 $env:AF_ACCOUNT_DB="D:\AFPH-data\assaultfire_accounts.sqlite3"
-.\START_ASSAULT_FIRE.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\START_ASSAULT_FIRE.ps1
 ```
 
-The launcher maps the game's server names on the host to `100.64.1.2` too, so the host's own game uses the same address as friends. A good start shows:
+Both variables last only for that window. Set them again in every new Administrator window, and keep `AF_ACCOUNT_DB` at the same path, or the server opens an empty account database and every friend's login is rejected.
+
+A good start shows, in the launcher window:
 
 ```text
-[OK] Windows hosts mappings already point to 100.64.1.2.
-[PREFLIGHT] game launch gate         : UNLOCKED
+[OK] Hosts mappings verified.
+[OK] Server launch gate is UNLOCKED. Server PID=...
 ```
 
-A host that does not play runs the server without the launcher, after the README's manual setup, in the same Administrator window:
+On later runs the first line reads `[OK] Windows hosts mappings already point to 100.64.1.2.` instead. The server window prints `[PREFLIGHT] game launch gate         : UNLOCKED`, and the host's own game uses 100.64.1.2, the same address as friends.
+
+The first time the server runs, and again at the first match, Windows may ask to allow `python.exe` and `TGame_AFDEV.exe`. Whatever the host clicks, Windows creates an inbound rule for that program on every port and address. A Block rule stops friends on every port, and an Allow rule opens 7777 and up. Open Windows Defender Firewall with Advanced Security, go to Inbound Rules, and delete every rule for `python.exe` and `TGame_AFDEV.exe`. The two rules from step 3 are all the server needs.
+
+A host that does not play still needs the client installed. The match server runs `Binaries\Win32\TGame_AFDEV.exe`, which only the one-click launcher builds, so run the launcher once in setup-only mode:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\START_ASSAULT_FIRE.ps1 -SetupOnly
+```
+
+Then run the server without the launcher in the same Administrator window:
 
 ```powershell
 .\.venv\Scripts\python.exe .\server\assaultfire_server_v143b.py --server-only
@@ -83,25 +93,23 @@ On the host, read the SHA256 of the public key file:
 Get-FileHash <game root>\TCLS\config\APClient.dat -Algorithm SHA256
 ```
 
-A host that runs `--server-only` without a game client uses `generated\APClient.dat` in the emulator folder, the public key that pairs with `server\PRIVATE.PEM`.
-
 Send each friend that `APClient.dat` file and the 64-character `Hash` value.
 
 **Never copy PRIVATE.PEM** to anyone. It is the server's private key. A friend's PC needs `APClient.dat` only.
 
 ## 6. Create each friend's account
 
-The account page listens on 127.0.0.1 only, so friends cannot register from their own PC. On the host, open the register page (normally `http://127.0.0.1:8080/register`, or the `[WEB] Registration` URL in the server window) and create a username and password for each friend. Send each friend their login privately.
+On the host, open the register page (normally `http://127.0.0.1:8080/register`, or the `[WEB] Registration` URL in the server window) and create a username and password for each friend. Send each friend their login privately.
 
 ## 7. Connect from a friend's PC
 
 The friend copies the host's file to `<game root>\TCLS\config\APClient.dat`, replacing the one there. Then they open PowerShell as Administrator in the emulator folder and run, with the host's address and hash:
 
 ```powershell
-.\START_ASSAULT_FIRE.ps1 -RemoteHost 100.64.1.2 -ApClientSha256 <hash>
+powershell -NoProfile -ExecutionPolicy Bypass -File .\START_ASSAULT_FIRE.ps1 -RemoteHost 100.64.1.2 -ApClientSha256 <hash>
 ```
 
-The launcher maps the game's server names to the host, checks that the file's SHA256 equals the hash, and starts no server on that PC. Success looks like this:
+The launcher checks the file's SHA256 against the hash. Success looks like this:
 
 ```text
 [PREFLIGHT] PASS - remote client checks succeeded; supported game launch helpers are UNLOCKED.
@@ -124,8 +132,8 @@ The client reaches the host in this order: VERSION, AUTH, DIR, ROLE, ZONE, then 
 |---|---|---|
 | Launcher | `-RemoteHost must be an IPv4 address` or `-ApClientSha256 is required with -RemoteHost` | The address or hash is missing or mistyped. |
 | Launcher | `APClient.dat SHA256 does not match the host's (--apclient-sha256)` | Wrong hash, or the friend's `APClient.dat` is not the host's file. Copy the file again and recheck the hash. |
-| VERSION | The client cannot connect. No `[VERSION] Connected` from the friend on the host. | TCP firewall rule missing, Tailscale off on either PC, or the friend's hosts mapping still points to 127.0.0.1 (run the launcher with `-RemoteHost`). |
-| AUTH | `[VERSION] Connected` but no `[AUTH] Connected`, or an RSA error on the host | Port 8000 missing from the TCP rule, or the host's key changed after the hash was sent. Send the new file and hash. |
+| VERSION | The client cannot connect. No `[VERSION] Connected` from the friend on the host. | TCP firewall rule missing, an inbound Block rule for python.exe (step 4), Tailscale off on either PC, or the friend's hosts mapping still points to 127.0.0.1 (run the launcher with `-RemoteHost`). |
+| AUTH | `[VERSION] Connected` but no `[AUTH] Connected`, or an RSA error on the host | Port 8000 missing from the TCP rule, or the host's key changed after the hash was sent. Send the new file and hash. Every login rejected: `AF_ACCOUNT_DB` missing or pointing at a new path, so the server opened an empty database. |
 | DIR | `[AUTH] Connected` but no `[DIR] Connected`, or `Get Game Server Info fail!` | Port 9010 missing from the TCP rule. |
 | ROLE | `[DIR] Connected` but no `[ROLE] Connected`, or `Network is disconnected:Connection Closed!` | `AF_PUBLIC_HOST` not set in the host's Administrator window, so the server sends 127.0.0.1. Port 65005 missing. Running through a subnet router. |
 | ZONE | `[ROLE] Connected` but no `[ZONE] Connected` | Port 65006 missing, or `AF_PUBLIC_HOST` not set. |
